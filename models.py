@@ -9,7 +9,7 @@ class Encoder(nn.Module):
 
         super(Encoder, self).__init__()
 
-        resnet = models.resnet152(pretrained=True)
+        resnet = models.resnet152(weights=models.ResNet152_Weights.DEFAULT)
 
         # Remove the fully connected layers, since we don't need the original resnet classes anymore
         modules = list(resnet.children())[:-1]
