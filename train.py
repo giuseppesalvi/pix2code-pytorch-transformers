@@ -7,6 +7,7 @@ from dataset import Pix2CodeDataset
 from utils import collate_fn, save_model, resnet_img_transformation
 from models import Encoder, Decoder
 import math
+import datetime
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train the model')
@@ -42,7 +43,8 @@ if __name__ == "__main__":
 
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
-    torch.mps.manual_seed(args.seed)
+    if torch.mps:
+        torch.mps.manual_seed(args.seed)
 
     # Load the vocab file
     vocab = Vocab(args.vocab_file_path)
@@ -85,6 +87,10 @@ if __name__ == "__main__":
                                                ) + list(encoder.BatchNorm.parameters())
     optimizer = torch.optim.Adam(params, lr=lr)
 
+    # Log start date and time
+    start = datetime.datetime.now()
+    print("Start Training date and time: {}".format(start.strftime("%Y-%m-%d %H:%M:%S")))
+
     # Training the model
     for epoch in range(1, args.epochs):
         for i, (images, captions, lengths) in enumerate(train_loader):
@@ -115,7 +121,10 @@ if __name__ == "__main__":
                            optimizer, epoch, loss, args.batch_size, vocab)
                 print("Saved model checkpoint")
 
-    print("Done Training!")
+    # Log end date and time elapsed time from start
+    end = datetime.datetime.now()
+    elapsed_time = (end - start).seconds
+    print("End Training date and time: {}, elapsed time  : {:02d}:{:02d}:{:02d}".format(end.strftime("%Y-%m-%d %H:%M:%S"), elapsed_time//3600, (elapsed_time%3600)//60, elapsed_time%60))
 
     save_model(args.models_dir, encoder, decoder,
                optimizer, epoch, loss, args.batch_size, vocab)
