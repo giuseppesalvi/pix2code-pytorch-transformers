@@ -86,7 +86,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(params, lr=lr)
 
     # Training the model
-    for epoch in range(args.epochs):
+    for epoch in range(1, args.epochs):
         for i, (images, captions, lengths) in enumerate(train_loader):
             images = images.to(device)
             captions = captions.to(device)
