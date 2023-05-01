@@ -54,13 +54,13 @@ def resnet_img_transformation(img_crop_size):
                                                     std=[0.229, 0.224, 0.225])])
 
 
-def save_model(models_folder_path, encoder, decoder, optimizer, epoch, loss, batch_size, vocab):
+def save_model(models_folder_path, encoder, decoder, optimizer, epoch, loss, batch_size, vocab, model_type):
     MODELS_FOLDER = Path(models_folder_path)
 
     # Create the models folder if it's not already there
     MODELS_FOLDER.mkdir(parents=True, exist_ok=True)
 
-    MODEL_PATH = MODELS_FOLDER / (model_name_formated("e-d-model",
+    MODEL_PATH = MODELS_FOLDER / (model_name_formated("e-d-model-" + model_type,
                                   {"epoch": epoch, "loss": loss, "batch": batch_size}) + ".pth")
 
     torch.save({'epoch': epoch,
