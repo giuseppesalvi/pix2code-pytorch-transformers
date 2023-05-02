@@ -89,9 +89,7 @@ if __name__ == "__main__":
 
     elif args.model == "pix2code":
         embed_size = 256
-        hidden_size = 512
-        num_layers = 1
-         
+
         vision_model =  P2cVisionModel().to(device)
         language_model = P2cLanguageModel(embed_size, len(vocab)).to(device)
         decoder = P2cDecoder(len(vocab)).to(device)
@@ -139,16 +137,11 @@ if __name__ == "__main__":
                 loss = criterion(outputs, targets)
             elif args.model == "pix2code":
                 encoded_images = vision_model(images)
-                #print("DBG: FINISHED VISION_MODEL")
                 partial_captions = captions[:, :-1]
                 target_captions = captions[:, 1:]
                 new_lengths = [length - 1 for length in lengths]  # Update the lengths list
                 encoded_texts = language_model(partial_captions)
-                #print("DBG: FINISHED LANGUAGE_MODEL")
                 outputs = decoder(encoded_images, encoded_texts)
-                #print("DBG: FINISHED DECODER")
-
-               
                 target_captions_packed = torch.nn.utils.rnn.pack_padded_sequence(target_captions, new_lengths, batch_first=True, enforce_sorted=False).data
                 outputs_packed = torch.nn.utils.rnn.pack_padded_sequence(outputs, new_lengths, batch_first=True, enforce_sorted=False).data
                 loss = criterion(outputs_packed, target_captions_packed)
@@ -205,7 +198,11 @@ if __name__ == "__main__":
         #print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}, Val Loss: {avg_val_loss}, Val BLEU Score: {avg_bleu_score}")
         print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}")
         if epoch != 0 and epoch % args.save_after_epochs == 0:
-            save_model(args.models_dir, encoder, decoder, optimizer, epoch, loss, args.batch_size, vocab, args.model)
+            if args.model == "pix2code":
+                save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss, args.batch_size, vocab, args.model)
+            else:
+                save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss, args.batch_size, vocab, args.model)
+
             print("Saved model checkpoint")
 
     # Log end date and time elapsed time from start
