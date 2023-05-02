@@ -4,10 +4,10 @@ from vocab import Vocab
 import torch
 from torch.utils.data import DataLoader
 from dataset import Pix2CodeDataset
-from utils import collate_fn, save_model, resnet_img_transformation
-from models import Encoder, Decoder, DecoderTransformer
-from modelsPix2Code import VisionModel, LanguageModel, Decoder
-import math
+from utils import collate_fn, save_model, resnet_img_transformation, original_pix2code_transformation
+from models import Encoder, Decoder, DecoderTransformer, P2cVisionModel, P2cLanguageModel, P2cDecoder
+import numpy as np
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import datetime
 
 if __name__ == "__main__":
@@ -26,7 +26,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning Rate")
     parser.add_argument("--print_freq", type=int, default=1, help="Print training stats every n epochs")
     parser.add_argument("--seed", type=int, default=2020, help="The random seed for reproducing")
-    parser.add_argument("--model", type=str, default="version2", help="Choose the model to use", choices=["lstm", "transformer"])
+    parser.add_argument("--model", type=str, default="version2", help="Choose the model to use", choices=["lstm", "transformer", "pix2code"])
 
     args = parser.parse_args()
     args.vocab_file_path = args.vocab_file_path if args.vocab_file_path else Path(Path(args.data_path).parent, "vocab.txt")
@@ -48,18 +48,29 @@ if __name__ == "__main__":
     assert use_cuda or use_mps # Trust me, you don't want to train this model on a cpu.
     device = torch.device("cuda" if use_cuda else "mps" if use_mps else "cpu")
 
-    transform_imgs = resnet_img_transformation(args.img_crop_size)
+    if args.model == "pix2code":
+        transform_imgs = original_pix2code_transformation()
+    else:
+        transform_imgs = resnet_img_transformation(args.img_crop_size)
 
     # Creating the data loader
-    train_loader = DataLoader(
-        Pix2CodeDataset(args.data_path, args.split, vocab, transform=transform_imgs),
+    train_dataloader = DataLoader(
+        Pix2CodeDataset(args.data_path, "train", vocab, transform=transform_imgs),
         batch_size=args.batch_size,
         collate_fn=lambda data: collate_fn(data, vocab=vocab),
         pin_memory=True if use_cuda or use_mps else False,
         num_workers=0,
         drop_last=True)
-    print("Created data loader")
 
+    # Creating the data loader
+    eval_dataloader = DataLoader(
+        Pix2CodeDataset(args.data_path, "validation", vocab, transform=transform_imgs),
+        batch_size=args.batch_size,
+        collate_fn=lambda data: collate_fn(data, vocab=vocab),
+        pin_memory=True if use_cuda or use_mps else False,
+        num_workers=0,
+        drop_last=True)
+    print("Created data loaders")
     lr = args.lr
     
     if args.model == "lstm":
@@ -73,6 +84,19 @@ if __name__ == "__main__":
      
         # Define optimizer and loss function
         params = list(decoder.parameters()) + list(encoder.linear.parameters()) + list(encoder.BatchNorm.parameters())
+        optimizer = torch.optim.Adam(params, lr=lr)
+        criterion = torch.nn.CrossEntropyLoss()
+
+    elif args.model == "pix2code":
+        embed_size = 256
+        hidden_size = 512
+        num_layers = 1
+         
+        vision_model =  P2cVisionModel().to(device)
+        language_model = P2cLanguageModel(embed_size, len(vocab)).to(device)
+        decoder = P2cDecoder(len(vocab)).to(device)
+
+        params = list(vision_model.parameters()) + list(language_model.parameters()) + list(decoder.parameters())
         optimizer = torch.optim.Adam(params, lr=lr)
         criterion = torch.nn.CrossEntropyLoss()
 
@@ -95,9 +119,16 @@ if __name__ == "__main__":
 
     # Training the model
     for epoch in range(1, args.epochs):
-        encoder.train()
-        decoder.train()
-        for i, (images, captions, lengths) in enumerate(train_loader):
+        # Training Loop
+        if args.model == "lstm" or args.model == "transformer":
+            encoder.train()
+            decoder.train()
+        elif args.model == "pix2code":
+            vision_model.train()
+            language_model.train()
+            decoder.train()
+
+        for i, (images, captions, lengths) in enumerate(train_dataloader):
             images = images.to(device)
             captions = captions.to(device)
 
@@ -106,6 +137,21 @@ if __name__ == "__main__":
                 features = encoder(images)
                 outputs = decoder(features, captions, lengths)
                 loss = criterion(outputs, targets)
+            elif args.model == "pix2code":
+                encoded_images = vision_model(images)
+                #print("DBG: FINISHED VISION_MODEL")
+                partial_captions = captions[:, :-1]
+                target_captions = captions[:, 1:]
+                new_lengths = [length - 1 for length in lengths]  # Update the lengths list
+                encoded_texts = language_model(partial_captions)
+                #print("DBG: FINISHED LANGUAGE_MODEL")
+                outputs = decoder(encoded_images, encoded_texts)
+                #print("DBG: FINISHED DECODER")
+
+               
+                target_captions_packed = torch.nn.utils.rnn.pack_padded_sequence(target_captions, new_lengths, batch_first=True, enforce_sorted=False).data
+                outputs_packed = torch.nn.utils.rnn.pack_padded_sequence(outputs, new_lengths, batch_first=True, enforce_sorted=False).data
+                loss = criterion(outputs_packed, target_captions_packed)
 
             elif args.model == "transformer":
                 features = encoder(images)
@@ -116,13 +162,51 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
 
-            loss = loss.item()
+        # Validation loop
+        #encoder.eval()
+        #decoder.eval()
+        #val_losses = []
+        #bleu_scores = []
 
-            if epoch % args.print_freq == 0 and i == 0: print(f'Epoch : {epoch} || Loss : {loss:.4f} || Perplexity : {math.exp(loss):.4f}')
+        #with torch.no_grad():
+            #for batch_idx, (images, captions, lengths) in enumerate(eval_dataloader):
+                #images = images.to(device)
+                #captions = captions.to(device)
+#
+                # Generate captions
+                #features = encoder(images)
+                #start_token_id = vocab.get_id_by_token(vocab.get_start_token)
+                #end_token_id = vocab.get_id_by_token(vocab.get_end_token)
+                #padding_token_id = vocab.get_id_by_token(vocab.get_padding_token)
+                #generated_captions = decoder.sample_greedy(features, start_token_id, end_token_id)
 
-            if epoch != 0 and epoch % args.save_after_epochs == 0 and i % len(train_loader) == 0:
-                save_model(args.models_dir, encoder, decoder, optimizer, epoch, loss, args.batch_size, vocab, args.model)
-                print("Saved model checkpoint")
+                # Calculate validation loss
+                #val_outputs = decoder(features, captions[:, :-1])
+                #val_loss = criterion(val_outputs.view(-1, len(vocab)), captions[:, 1:].flatten())
+                #val_losses.append(val_loss.item())
+
+                # Calculate BLEU score
+                #smooth_func = SmoothingFunction().method4
+                #for gen_caption, gt_caption in zip(generated_captions, captions):
+                    #gen_caption_text = [vocab.get_token_by_id[word_id] for word_id in gen_caption.cpu().numpy()]
+                    #gt_caption_text = [vocab.get_token_by_id[word_id] for word_id in gt_caption.cpu().numpy()]
+#
+                    ## Remove start, end and padding tokens from the generated and ground truth captions
+                    #list_start_end_padding_tokens = [vocab.get_start_token, vocab.get_end_token, vocab.get_padding_token]
+                    #gen_caption_text = [word for word in gen_caption_text if word not in list_start_end_padding_tokens]
+                    #gt_caption_text = [word for word in gt_caption_text if word not in list_start_end_padding_tokens]
+#
+                    #bleu_score = sentence_bleu([gt_caption_text], gen_caption_text, smoothing_function=smooth_func)
+                    #bleu_scores.append(bleu_score)
+#
+        #avg_val_loss = np.mean(val_losses)
+        #avg_bleu_score = np.mean(bleu_scores)
+
+        #print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}, Val Loss: {avg_val_loss}, Val BLEU Score: {avg_bleu_score}")
+        print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}")
+        if epoch != 0 and epoch % args.save_after_epochs == 0:
+            save_model(args.models_dir, encoder, decoder, optimizer, epoch, loss, args.batch_size, vocab, args.model)
+            print("Saved model checkpoint")
 
     # Log end date and time elapsed time from start
     end = datetime.datetime.now()
@@ -131,3 +215,5 @@ if __name__ == "__main__":
 
     save_model(args.models_dir, encoder, decoder, optimizer, epoch, loss, args.batch_size, vocab, args.model)
     print("Saved final model")
+
+

@@ -74,6 +74,7 @@ class Decoder(nn.Module):
 
         return sampled_ids.squeeze()
 
+# Decoder implementation with Transformer 
 class DecoderTransformer(nn.Module):
     def __init__(self, embed_size, hidden_size, vocab_size, num_layers, nhead=8, dropout=0.1):
         super(DecoderTransformer, self).__init__()
@@ -96,14 +97,23 @@ class DecoderTransformer(nn.Module):
         output = self.transformer_decoder(tgt, features, tgt_mask=tgt_mask)
         output = self.linear(output)
         return output
+        
+    def preprocess_encoder_features(self, features, target_seq_len):
+        features = features.unsqueeze(1)
+        features = features.repeat(1, target_seq_len, 1)
+        return features
 
-    def sample(self, features, sos_token, eos_token, max_len=100):
+    def sample_greedy(self, features, start_token_id, end_token_id, max_len=100):
+        print("DBG features shape ", features.shape)
         features = self.preprocess_encoder_features(features, max_len)
+        print("DBG features shape ", features.shape)
         batch_size = features.size(0)
-        sampled_ids = [torch.ones(batch_size, 1).fill_(sos_token).long().to(features.device)]
+        sampled_ids = [torch.ones(batch_size, 1).fill_(start_token_id).long().to(features.device)]
+        print("DBG sampled_ids ", sampled_ids)
         inputs = sampled_ids[-1]
+        print("DBG inputs ", inputs)
 
-        for i in range(max_len):
+        for _ in range(max_len):
             tgt = self.embed(inputs)
             tgt = self.pos_enc(tgt)
             output = self.transformer_decoder(tgt, features)
@@ -112,16 +122,12 @@ class DecoderTransformer(nn.Module):
             sampled_ids.append(predicted)
             inputs = predicted
 
-            if (predicted.squeeze() == eos_token).all():
+            if (predicted.squeeze() == end_token_id).all():
                 break
 
         sampled_ids = torch.cat(sampled_ids, dim=1)
         return sampled_ids.squeeze()
 
-    def preprocess_encoder_features(self, features, target_seq_len):
-        features = features.unsqueeze(1)
-        features = features.repeat(1, target_seq_len, 1)
-        return features
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -140,3 +146,83 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
+
+# Original Pix2code models
+class P2cVisionModel(nn.Module):
+    def __init__(self):
+        super(P2cVisionModel, self).__init__()
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Dropout(p=0.25),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Dropout(p=0.25),
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Dropout(p=0.25),
+
+            nn.Flatten(),
+            nn.Linear(128*32*32, 1024),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+        )
+
+    def forward(self, images):
+        return self.cnn(images)
+
+
+class P2cLanguageModel(nn.Module):
+    def __init__(self, embed_size, vocab_size):
+        super(P2cLanguageModel, self).__init__()
+
+        # TODO: check this better
+        self.embed_size = embed_size
+        self.embed = nn.Embedding(
+            num_embeddings=vocab_size, embedding_dim=embed_size)
+        self.lstm1 = nn.LSTM(input_size=embed_size,
+                             hidden_size=128, num_layers=1, batch_first=True)
+        self.lstm2 = nn.LSTM(128, 128, num_layers=1, batch_first=True)
+
+    def forward(self, partial_captions):
+        # TODO: check this better
+        embeddings = self.embed(partial_captions)
+        encoded_texts, _ = self.lstm1(embeddings)
+        encoded_texts, _ = self.lstm2(encoded_texts)
+        return encoded_texts
+
+
+class P2cDecoder(nn.Module):
+    def __init__(self, output_size):
+        super(P2cDecoder, self).__init__()
+
+        self.lstm1 = nn.LSTM(input_size=1024+128,
+                             hidden_size=512, num_layers=1, batch_first=True)
+        self.lstm2 = nn.LSTM(512, 512, num_layers=1, batch_first=True)
+        self.linear = nn.Linear(512, output_size)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, encoded_images, encoded_texts):
+        repeated_images = encoded_images.unsqueeze(
+            1).repeat(1, encoded_texts.size(1), 1)
+        decoder_input = torch.cat((repeated_images, encoded_texts), dim=2)
+        output, _ = self.lstm1(decoder_input)
+        output, _ = self.lstm2(output)
+        output = self.linear(output)
+        output = self.softmax(output)
+        return output

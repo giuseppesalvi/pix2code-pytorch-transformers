@@ -53,6 +53,9 @@ def resnet_img_transformation(img_crop_size):
                                transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                     std=[0.229, 0.224, 0.225])])
 
+def original_pix2code_transformation():
+    return transforms.Compose([transforms.Resize((256, 256)),
+                               transforms.ToTensor()])
 
 def save_model(models_folder_path, encoder, decoder, optimizer, epoch, loss, batch_size, vocab, model_type):
     MODELS_FOLDER = Path(models_folder_path)
