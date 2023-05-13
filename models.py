@@ -137,6 +137,45 @@ class DecoderTransformer(nn.Module):
         # Remove the initial start_token_id from the generated sequences
         return generated_sequences[:, 1:]
 
+    def beam_search(self, features, start_token_id, end_token_id, max_len=100, beam_size=5):
+        batch_size = features.size(0)
+        generated_sequences = torch.full((batch_size, 1), start_token_id, dtype=torch.long, device=features.device)
+
+        # Create a tensor to store the scores of each sequence
+        sequence_scores = torch.zeros(batch_size, beam_size).to(features.device)
+
+        for _ in range(max_len):
+            # Get the output probabilities for the current step
+            output = self.forward(features, generated_sequences)
+            output_probs = torch.softmax(output[:, -1, :], dim=-1)
+
+            # Multiply the current step's probabilities with the previous steps' accumulated scores
+            scores = sequence_scores.unsqueeze(2) + torch.log(output_probs)
+
+            # Reshape the scores to get the top k candidates (beam_size) for each sequence in the batch
+            top_k_scores, top_k_indices = torch.topk(scores.view(batch_size, -1), k=beam_size)
+
+            # Update the sequence_scores
+            sequence_scores = top_k_scores
+
+            # Compute the new generated_sequences
+            generated_sequences = torch.cat([generated_sequences.repeat_interleave(beam_size, dim=1),
+                                         top_k_indices.view(batch_size, beam_size, 1)], dim=2)
+
+            # Find the features and generated_sequences indices that correspond to the new top k sequences
+            next_features_indices = torch.div(top_k_indices, generated_sequences.size(2)).view(-1)
+            generated_sequences = generated_sequences.view(batch_size * beam_size, -1)
+
+            # Update the features to match the new top k sequences
+            features = features[next_features_indices]
+
+            # Check if all sequences have reached the end_token_id
+            if torch.all((top_k_indices % generated_sequences.size(2) == end_token_id).view(-1)):
+                break
+
+        # Remove the initial start_token_id from the generated sequences
+        return generated_sequences[:, 1:].view(batch_size, beam_size, -1)
+
 
 # Original Pix2code models
 class P2cVisionModel(nn.Module):
