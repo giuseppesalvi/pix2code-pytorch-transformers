@@ -3,30 +3,6 @@ import torch.nn as nn
 import torchvision.models as models
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
 
-class Encoder(nn.Module):
-
-    def __init__(self, embedding_size):
-
-        super(Encoder, self).__init__()
-
-        resnet = models.resnet152(weights=models.ResNet152_Weights.DEFAULT)
-
-        # Remove the fully connected layers, since we don't need the original resnet classes anymore
-        modules = list(resnet.children())[:-1]
-        self.resnet = nn.Sequential(*modules)
-
-        # Create a new fc layer based on the embedding size
-        self.linear = nn.Linear(
-            in_features=resnet.fc.in_features, out_features=embedding_size)
-        self.BatchNorm = nn.BatchNorm1d(
-            num_features=embedding_size, momentum=0.01)
-
-    def forward(self, images):
-        features = self.resnet(images)
-        features = features.view(features.size(0), -1)
-        features = self.BatchNorm(self.linear(features))
-        return features
-
 
 class Decoder(nn.Module):
 
@@ -74,6 +50,47 @@ class Decoder(nn.Module):
 
         return sampled_ids.squeeze()
 
+class Encoder(nn.Module):
+
+    def __init__(self, embedding_size):
+
+        super(Encoder, self).__init__()
+
+        resnet = models.resnet152(weights=models.ResNet152_Weights.DEFAULT)
+
+        # Remove the fully connected layers, since we don't need the original resnet classes anymore
+        modules = list(resnet.children())[:-1]
+        self.resnet = nn.Sequential(*modules)
+
+        # Create a new fc layer based on the embedding size
+        self.linear = nn.Linear(
+            in_features=resnet.fc.in_features, out_features=embedding_size)
+        self.BatchNorm = nn.BatchNorm1d(
+            num_features=embedding_size, momentum=0.01)
+
+    def forward(self, images):
+        features = self.resnet(images)
+        features = features.view(features.size(0), -1)
+        features = self.BatchNorm(self.linear(features))
+        return features
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+
 # Decoder implementation with Transformer 
 class DecoderTransformer(nn.Module):
     def __init__(self, embed_size, hidden_size, vocab_size, num_layers, nhead=8, dropout=0.1):
@@ -103,48 +120,22 @@ class DecoderTransformer(nn.Module):
         features = features.repeat(1, target_seq_len, 1)
         return features
 
-    def sample_greedy(self, features, start_token_id, end_token_id, max_len=100):
-        print("DBG features shape ", features.shape)
-        features = self.preprocess_encoder_features(features, max_len)
-        print("DBG features shape ", features.shape)
+    def greedy_search(self, features, start_token_id, end_token_id, max_len=100):
         batch_size = features.size(0)
-        sampled_ids = [torch.ones(batch_size, 1).fill_(start_token_id).long().to(features.device)]
-        print("DBG sampled_ids ", sampled_ids)
-        inputs = sampled_ids[-1]
-        print("DBG inputs ", inputs)
+        generated_sequences = torch.full((batch_size, 1), start_token_id, dtype=torch.long, device=features.device)
 
         for _ in range(max_len):
-            tgt = self.embed(inputs)
-            tgt = self.pos_enc(tgt)
-            output = self.transformer_decoder(tgt, features)
-            output = self.linear(output)
-            predicted = output.max(dim=2, keepdim=True)[1]
-            sampled_ids.append(predicted)
-            inputs = predicted
+            output = self.forward(features, generated_sequences)
+            _, next_words = torch.max(output[:, -1, :], dim=-1)
+            next_words = next_words.unsqueeze(1)
+            generated_sequences = torch.cat((generated_sequences, next_words), dim=1)
 
-            if (predicted.squeeze() == end_token_id).all():
+            # Check if all sequences have reached the end_token_id
+            if torch.all((next_words == end_token_id).view(-1)):
                 break
 
-        sampled_ids = torch.cat(sampled_ids, dim=1)
-        return sampled_ids.squeeze()
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
-        return self.dropout(x)
+        # Remove the initial start_token_id from the generated sequences
+        return generated_sequences[:, 1:]
 
 
 # Original Pix2code models

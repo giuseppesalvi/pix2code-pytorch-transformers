@@ -116,7 +116,7 @@ if __name__ == "__main__":
     print("Start Training date and time: {}".format(start.strftime("%Y-%m-%d %H:%M:%S")))
 
     # Training the model
-    for epoch in range(1, args.epochs):
+    for epoch in range(1, args.epochs + 1):
         # Training Loop
         if args.model == "lstm" or args.model == "transformer":
             encoder.train()
@@ -156,47 +156,45 @@ if __name__ == "__main__":
             optimizer.step()
 
         # Validation loop
-        #encoder.eval()
-        #decoder.eval()
+        start_val= datetime.datetime.now()
+        print("Start Validation date and time: {}".format(start_val.strftime("%Y-%m-%d %H:%M:%S")))
+        encoder.eval()
+        decoder.eval()
         #val_losses = []
-        #bleu_scores = []
+        bleu_scores = []
 
-        #with torch.no_grad():
-            #for batch_idx, (images, captions, lengths) in enumerate(eval_dataloader):
-                #images = images.to(device)
-                #captions = captions.to(device)
+        with torch.no_grad():
+            for batch_idx, (images, captions, lengths) in enumerate(eval_dataloader):
+                images = images.to(device)
+                captions = captions.to(device)
 #
                 # Generate captions
-                #features = encoder(images)
-                #start_token_id = vocab.get_id_by_token(vocab.get_start_token)
-                #end_token_id = vocab.get_id_by_token(vocab.get_end_token)
-                #padding_token_id = vocab.get_id_by_token(vocab.get_padding_token)
-                #generated_captions = decoder.sample_greedy(features, start_token_id, end_token_id)
-
-                # Calculate validation loss
-                #val_outputs = decoder(features, captions[:, :-1])
-                #val_loss = criterion(val_outputs.view(-1, len(vocab)), captions[:, 1:].flatten())
-                #val_losses.append(val_loss.item())
+                features = encoder(images)
+                start_token_id = vocab.get_id_by_token(vocab.get_start_token())
+                end_token_id = vocab.get_id_by_token(vocab.get_end_token())
+                padding_token_id = vocab.get_id_by_token(vocab.get_padding_token())
+                generated_captions = decoder.greedy_search(features, start_token_id, end_token_id)
 
                 # Calculate BLEU score
-                #smooth_func = SmoothingFunction().method4
-                #for gen_caption, gt_caption in zip(generated_captions, captions):
-                    #gen_caption_text = [vocab.get_token_by_id[word_id] for word_id in gen_caption.cpu().numpy()]
-                    #gt_caption_text = [vocab.get_token_by_id[word_id] for word_id in gt_caption.cpu().numpy()]
-#
-                    ## Remove start, end and padding tokens from the generated and ground truth captions
-                    #list_start_end_padding_tokens = [vocab.get_start_token, vocab.get_end_token, vocab.get_padding_token]
-                    #gen_caption_text = [word for word in gen_caption_text if word not in list_start_end_padding_tokens]
-                    #gt_caption_text = [word for word in gt_caption_text if word not in list_start_end_padding_tokens]
-#
-                    #bleu_score = sentence_bleu([gt_caption_text], gen_caption_text, smoothing_function=smooth_func)
-                    #bleu_scores.append(bleu_score)
-#
-        #avg_val_loss = np.mean(val_losses)
-        #avg_bleu_score = np.mean(bleu_scores)
+                smooth_func = SmoothingFunction().method4
 
-        #print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}, Val Loss: {avg_val_loss}, Val BLEU Score: {avg_bleu_score}")
-        print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}")
+                gen_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in generated_captions.tolist()]
+                gt_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in captions.tolist()]
+
+                # Remove start, end and padding tokens from the generated and ground truth captions
+                list_start_end_padding_tokens = [vocab.get_start_token(), vocab.get_end_token(), vocab.get_padding_token()]
+                gen_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in gen_caption_text]
+                gt_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in gt_caption_text]
+
+
+                for gt_caption, gen_caption in zip(gt_caption_text, gen_caption_text):
+                    bleu_score = sentence_bleu([gt_caption], gen_caption, smoothing_function=smooth_func)
+                    bleu_scores.append(bleu_score)
+
+        #avg_val_loss = np.mean(val_losses)
+        avg_bleu_score = np.mean(bleu_scores)
+
+        print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}, Val BLEU Score: {avg_bleu_score}")
         if epoch != 0 and epoch % args.save_after_epochs == 0:
             if args.model == "pix2code":
                 save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss, args.batch_size, vocab, args.model)
