@@ -9,6 +9,8 @@ from models import Encoder, Decoder, DecoderTransformer, P2cVisionModel, P2cLang
 import numpy as np
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import datetime
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from tqdm import tqdm
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train the model')
@@ -27,6 +29,8 @@ if __name__ == "__main__":
     parser.add_argument("--print_freq", type=int, default=1, help="Print training stats every n epochs")
     parser.add_argument("--seed", type=int, default=2020, help="The random seed for reproducing")
     parser.add_argument("--model", type=str, default="version2", help="Choose the model to use", choices=["lstm", "transformer", "pix2code"])
+    parser.add_argument("--early_stopping_patience", type=int, default=5)
+    parser.add_argument("--lr_patience", type=int, default=3)
 
     args = parser.parse_args()
     args.vocab_file_path = args.vocab_file_path if args.vocab_file_path else Path(Path(args.data_path).parent, "vocab.txt")
@@ -115,6 +119,13 @@ if __name__ == "__main__":
     start = datetime.datetime.now()
     print("Start Training date and time: {}".format(start.strftime("%Y-%m-%d %H:%M:%S")))
 
+    # Create a scheduler
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=args.lr_patience, verbose=True)
+
+    # Initialize variables for early stopping
+    epochs_without_improvement = 0
+    best_bleu_score = 0
+
     # Training the model
     for epoch in range(1, args.epochs + 1):
         # Training Loop
@@ -126,7 +137,9 @@ if __name__ == "__main__":
             language_model.train()
             decoder.train()
 
-        for i, (images, captions, lengths) in enumerate(train_dataloader):
+
+        train_loop = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Training Epoch {epoch}/{args.epochs}")
+        for i, (images, captions, lengths) in train_loop:
             images = images.to(device)
             captions = captions.to(device)
 
@@ -155,6 +168,9 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
 
+            # Update the progress bar
+            train_loop.set_postfix(loss=loss.item())
+
         # Validation loop
         start_val= datetime.datetime.now()
         print("Start Validation date and time: {}".format(start_val.strftime("%Y-%m-%d %H:%M:%S")))
@@ -163,8 +179,10 @@ if __name__ == "__main__":
         #val_losses = []
         bleu_scores = []
 
+
         with torch.no_grad():
-            for batch_idx, (images, captions, lengths) in enumerate(eval_dataloader):
+            eval_loop = tqdm(enumerate(eval_dataloader), total=len(eval_dataloader), desc=f"Validation Epoch {epoch}/{args.epochs}")
+            for i, (images, captions, lengths) in eval_loop:
                 images = images.to(device)
                 captions = captions.to(device)
 #
@@ -191,8 +209,25 @@ if __name__ == "__main__":
                     bleu_score = sentence_bleu([gt_caption], gen_caption, smoothing_function=smooth_func)
                     bleu_scores.append(bleu_score)
 
-        #avg_val_loss = np.mean(val_losses)
+
+                # Update the progress bar
+                eval_loop.set_postfix(val_bleu_score=np.mean(bleu_scores))
+
         avg_bleu_score = np.mean(bleu_scores)
+
+        # Update the learning rate based on validation BLEU score
+        scheduler.step(avg_bleu_score)
+
+            # Early stopping condition
+        if avg_bleu_score > best_bleu_score:
+            best_bleu_score = avg_bleu_score
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if epochs_without_improvement >= args.early_stopping_patience:
+            print("Stopping training early due to lack of improvement in validation BLEU score.")
+            break
 
         print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}, Val BLEU Score: {avg_bleu_score}")
         if epoch != 0 and epoch % args.save_after_epochs == 0:
