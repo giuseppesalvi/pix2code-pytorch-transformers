@@ -7,7 +7,7 @@ from dataset import Pix2CodeDataset
 from utils import collate_fn, save_model, resnet_img_transformation, original_pix2code_transformation
 from models import Encoder, Decoder, DecoderTransformer, P2cVisionModel, P2cLanguageModel, P2cDecoder
 import numpy as np
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
 import datetime
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
@@ -67,13 +67,14 @@ if __name__ == "__main__":
         drop_last=True)
 
     # Creating the data loader
-    eval_dataloader = DataLoader(
+    valid_dataloader = DataLoader(
         Pix2CodeDataset(args.data_path, "validation", vocab, transform=transform_imgs),
         batch_size=args.batch_size,
         collate_fn=lambda data: collate_fn(data, vocab=vocab),
         pin_memory=True if use_cuda or use_mps else False,
         num_workers=0,
         drop_last=True)
+
     print("Created data loaders")
     lr = args.lr
     
@@ -138,8 +139,8 @@ if __name__ == "__main__":
             decoder.train()
 
 
-        train_loop = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Training Epoch {epoch}/{args.epochs}")
-        for i, (images, captions, lengths) in train_loop:
+        train_loop = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Epoch {epoch}/{args.epochs} - train loop")
+        for i, (images, captions,lengths) in train_loop:
             images = images.to(device)
             captions = captions.to(device)
 
@@ -172,31 +173,31 @@ if __name__ == "__main__":
             train_loop.set_postfix(loss=loss.item())
 
         # Validation loop
-        start_val= datetime.datetime.now()
-        print("Start Validation date and time: {}".format(start_val.strftime("%Y-%m-%d %H:%M:%S")))
         encoder.eval()
         decoder.eval()
-        #val_losses = []
         bleu_scores = []
 
-
         with torch.no_grad():
-            eval_loop = tqdm(enumerate(eval_dataloader), total=len(eval_dataloader), desc=f"Validation Epoch {epoch}/{args.epochs}")
+            eval_loop = tqdm(enumerate(valid_dataloader), total=len(valid_dataloader), desc=f"Epoch {epoch}/{args.epochs} - valid loop")
             for i, (images, captions, lengths) in eval_loop:
                 images = images.to(device)
                 captions = captions.to(device)
-#
+
                 # Generate captions
                 features = encoder(images)
+
                 start_token_id = vocab.get_id_by_token(vocab.get_start_token())
                 end_token_id = vocab.get_id_by_token(vocab.get_end_token())
                 padding_token_id = vocab.get_id_by_token(vocab.get_padding_token())
-                generated_captions = decoder.greedy_search(features, start_token_id, end_token_id)
 
-                # Calculate BLEU score
-                smooth_func = SmoothingFunction().method4
+                if args.model == "lstm":
+                    generated_caption_ids = decoder.sample(features)
+                    generated_caption_ids= sample_ids.cpu().data.numpy()
+                elif args.model == "transformer":
+                    sample_ids = decoder.greedy_search(features, start_token_id, end_token_id)
+                    generated_caption_ids= sample_ids.cpu().data.numpy()
 
-                gen_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in generated_captions.tolist()]
+                gen_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in generated_caption_ids]
                 gt_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in captions.tolist()]
 
                 # Remove start, end and padding tokens from the generated and ground truth captions
@@ -206,7 +207,9 @@ if __name__ == "__main__":
 
 
                 for gt_caption, gen_caption in zip(gt_caption_text, gen_caption_text):
-                    bleu_score = sentence_bleu([gt_caption], gen_caption, smoothing_function=smooth_func)
+                    #bleu_score = sentence_bleu([gt_caption], gen_caption, smoothing_function=smooth_func)
+                    bleu_score = corpus_bleu([[gt_caption]], [gen_caption], smoothing_function=SmoothingFunction().method4)
+
                     bleu_scores.append(bleu_score)
 
 
@@ -218,23 +221,23 @@ if __name__ == "__main__":
         # Update the learning rate based on validation BLEU score
         scheduler.step(avg_bleu_score)
 
-            # Early stopping condition
+        # Early stopping condition
         if avg_bleu_score > best_bleu_score:
             best_bleu_score = avg_bleu_score
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
 
-        if epochs_without_improvement >= args.early_stopping_patience:
-            print("Stopping training early due to lack of improvement in validation BLEU score.")
-            break
+        #if epochs_without_improvement >= args.early_stopping_patience:
+            #print("Stopping training early due to lack of improvement in validation BLEU score.")
+            #break
 
-        print(f"Epoch: {epoch}/{args.epochs}, Loss: {loss.item()}, Val BLEU Score: {avg_bleu_score}")
+        print("Epoch: {}/{}, Loss: {:.3f}, Val BLEU Score: {:03f}".format(epoch, args.epochs, loss.item(), avg_bleu_score))
         if epoch != 0 and epoch % args.save_after_epochs == 0:
             if args.model == "pix2code":
-                save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss, args.batch_size, vocab, args.model)
+                save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
             else:
-                save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss, args.batch_size, vocab, args.model)
+                save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
 
             print("Saved model checkpoint")
 
@@ -243,7 +246,10 @@ if __name__ == "__main__":
     elapsed_time = (end - start).seconds
     print("End Training date and time: {}, elapsed time  : {:02d}:{:02d}:{:02d}".format(end.strftime("%Y-%m-%d %H:%M:%S"), elapsed_time//3600, (elapsed_time%3600)//60, elapsed_time%60))
 
-    save_model(args.models_dir, encoder, decoder, optimizer, epoch, loss, args.batch_size, vocab, args.model)
+    if args.model == "pix2code":
+        save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
+    else:
+        save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
     print("Saved final model")
 
 

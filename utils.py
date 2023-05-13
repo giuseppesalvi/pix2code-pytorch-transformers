@@ -57,7 +57,12 @@ def original_pix2code_transformation():
     return transforms.Compose([transforms.Resize((256, 256)),
                                transforms.ToTensor()])
 
-def save_model(models_folder_path, encoder, decoder, optimizer, epoch, loss, batch_size, vocab, model_type):
+def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vocab, model_type):
+    if model_type == "pix2code":
+        vision_model, language_model, decoder = model
+    else:
+        encoder, decoder = model
+
     MODELS_FOLDER = Path(models_folder_path)
 
     # Create the models folder if it's not already there
@@ -66,7 +71,17 @@ def save_model(models_folder_path, encoder, decoder, optimizer, epoch, loss, bat
     MODEL_PATH = MODELS_FOLDER / (model_name_formated("e-d-model-" + model_type,
                                   {"epoch": epoch, "loss": loss, "batch": batch_size}) + ".pth")
 
-    torch.save({'epoch': epoch,
+    if model_type == "pix2code":
+        torch.save({'epoch': epoch,
+                'vision_model_state_dict': encoder.state_dict(),
+                'language_model_state_dict': encoder.state_dict(),
+                'decoder_model_state_dict': decoder.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss,
+                'vocab': vocab
+                }, MODEL_PATH)
+    else:
+        torch.save({'epoch': epoch,
                 'encoder_model_state_dict': encoder.state_dict(),
                 'decoder_model_state_dict': decoder.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
