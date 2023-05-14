@@ -101,20 +101,21 @@ class DecoderTransformer(nn.Module):
 
         self.pos_enc = PositionalEncoding(embed_size, dropout)
 
-        transformer_decoder_layer = TransformerDecoderLayer(embed_size, nhead, hidden_size, dropout)
+        transformer_decoder_layer = TransformerDecoderLayer(embed_size, nhead, hidden_size, dropout, batch_first=True)
         self.transformer_decoder = TransformerDecoder(transformer_decoder_layer, num_layers)
 
         self.linear = nn.Linear(in_features=embed_size, out_features=vocab_size)
 
-    def forward(self, features, tgt, tgt_mask=None):
+    def forward(self, features, tgt, tgt_mask=None, tgt_pad_mask=None):
         target_seq_len = tgt.size(1)
         features = self.preprocess_encoder_features(features, target_seq_len)
+        
         tgt = self.embed(tgt)
         tgt = self.pos_enc(tgt)
-        output = self.transformer_decoder(tgt, features, tgt_mask=tgt_mask)
+        output = self.transformer_decoder(tgt, features, tgt_mask=tgt_mask, tgt_key_padding_mask=tgt_pad_mask)
         output = self.linear(output)
         return output
-        
+
     def preprocess_encoder_features(self, features, target_seq_len):
         features = features.unsqueeze(1)
         features = features.repeat(1, target_seq_len, 1)

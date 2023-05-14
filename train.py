@@ -140,7 +140,7 @@ if __name__ == "__main__":
 
 
         train_loop = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Epoch {epoch}/{args.epochs} - train loop")
-        for i, (images, captions,lengths) in train_loop:
+        for i, (images, captions, lengths) in train_loop:
             images = images.to(device)
             captions = captions.to(device)
 
@@ -162,8 +162,20 @@ if __name__ == "__main__":
 
             elif args.model == "transformer":
                 features = encoder(images)
-                outputs = decoder(features, captions[:, :-1])
-                loss = criterion(outputs.view(-1, len(vocab)), captions[:, 1:].flatten())
+                #outputs = decoder(features, captions[:, :-1])
+                captions_input = captions[:,:-1]
+                captions_expected = captions[:,1:]
+
+                # add tgt mask
+                # add padding mask, real length are in lengths
+                tgt_mask = torch.nn.Transformer().generate_square_subsequent_mask(captions_input.size(1)).to(device)
+                tgt_pad_mask = (captions_input == vocab.get_id_by_token(vocab.get_padding_token()))
+        
+        
+
+                outputs = decoder(features, captions_input, tgt_mask, tgt_pad_mask)
+                #loss = criterion(outputs.view(-1, len(vocab)), captions.flatten())
+                loss = criterion(outputs.view(-1, len(vocab)), captions_expected.flatten())
             
             optimizer.zero_grad()
             loss.backward()
