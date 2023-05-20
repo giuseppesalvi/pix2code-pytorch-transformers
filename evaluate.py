@@ -10,6 +10,7 @@ from models import Encoder, Decoder, DecoderTransformer
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 import math
 from tqdm import tqdm
+import numpy as np
 import datetime
 
 if __name__ == "__main__":
@@ -25,6 +26,9 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=2020, help="The random seed for reproducing ")
     parser.add_argument("--model", type=str, default="version2", help="Choose the model to use", choices=["lstm", "transformer", "pix2code"])
+    parser.add_argument("--beam_search", action='store_true', default=False, help="Use beam search instead of greedy search")
+    parser.add_argument("--beam_size", type=int, default=4)
+
 
     args = parser.parse_args()
     print("Evaluation args:", args)
@@ -130,7 +134,10 @@ if __name__ == "__main__":
             generated_caption_ids = decoder.sample(features)
             generated_caption_ids= generated_caption_ids.cpu().data.numpy()
         elif args.model == "transformer":
-            generated_caption_ids = decoder.greedy_search(features, start_token_id, end_token_id)
+            if args.beam_search:
+                generated_caption_ids = decoder.beam_search(features, start_token_id, end_token_id, padding_token_id, beam_size=args.beam_size)
+            else:
+                generated_caption_ids = decoder.greedy_search(features, start_token_id, end_token_id)
             generated_caption_ids= generated_caption_ids[0].cpu().data.numpy()
 
         predictions.append(generated_caption_ids)
@@ -143,19 +150,32 @@ if __name__ == "__main__":
     print("End Evaluation date and time: {}, elapsed time  : {:02d}:{:02d}:{:02d}".format(end.strftime("%Y-%m-%d %H:%M:%S"), elapsed_time//3600, (elapsed_time%3600)//60, elapsed_time%60))
 
 
-    #predictions = [ids_to_tokens(vocab, prediction) for prediction in predictions]
-    #targets = [ids_to_tokens(vocab, target) for target in targets]
-    predictions_as_text = []
-    for prediction in predictions:
-        predictions_as_text.append(ids_to_tokens(vocab, prediction))
+    predictions = [ids_to_tokens(vocab, prediction) for prediction in predictions]
+    targets = [ids_to_tokens(vocab, target) for target in targets]
 
-    targets_as_text = []
-    for target in targets:
-        targets_as_text.append(ids_to_tokens(vocab, target))
+    with open("prediction3.txt", "w") as f:
+        for pred in predictions:
+            print(pred, file=f)
+            print("\n")
 
 
-    bleu = corpus_bleu([[target] for target in targets], predictions, smoothing_function=SmoothingFunction().method4)
-    print("BLEU score: {}".format(bleu))
+    with open("targets3.txt", "w") as f:
+        for targ in targets:
+            print(targ, file=f)
+            print("\n")
+
+    # Remove start, end and padding tokens from the generated and ground truth captions
+    list_start_end_padding_tokens = [vocab.get_start_token(), vocab.get_end_token(), vocab.get_padding_token()]
+    gen_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in predictions]
+    gt_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in targets]
+
+
+    bleu_scores = []
+    for gt_caption, gen_caption in zip(gt_caption_text, gen_caption_text):
+        bleu_score = corpus_bleu([[gt_caption]], [gen_caption], smoothing_function=SmoothingFunction().method4)
+        bleu_scores.append(bleu_score)
+
+    print("BLEU score: {}".format(np.mean(bleu_scores)))
 
     if args.viz:
         generate_visualization_object(test_dataloader.dataset, predictions, targets)

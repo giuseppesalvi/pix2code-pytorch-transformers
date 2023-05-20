@@ -104,6 +104,8 @@ class DecoderTransformer(nn.Module):
         transformer_decoder_layer = TransformerDecoderLayer(embed_size, nhead, hidden_size, dropout, batch_first=True)
         self.transformer_decoder = TransformerDecoder(transformer_decoder_layer, num_layers)
 
+        
+
         self.linear = nn.Linear(in_features=embed_size, out_features=vocab_size)
 
     def forward(self, features, tgt, tgt_mask=None, tgt_pad_mask=None):
@@ -138,45 +140,127 @@ class DecoderTransformer(nn.Module):
         # Remove the initial start_token_id from the generated sequences
         return generated_sequences[:, 1:]
 
-    def beam_search(self, features, start_token_id, end_token_id, max_len=100, beam_size=5):
+    #def beam_search(self, features, start_token_id, end_token_id, max_len=100, beam_size=3):
+
+        #batch_size = features.size(0)
+
+        ## Beam options will be processed, as an extension of batch size
+        #generated_sequences = torch.full((batch_size * beam_size, 1), start_token_id, dtype=torch.long, device=features.device)
+        #features_extended = features.repeat(beam_size, 1)
+        
+
+        ## Create a tensor to store the scores of each sequence
+        #sequence_scores = torch.zeros(batch_size * beam_size, 1).to(features.device)
+
+        #first_time = True
+        #for _ in range(max_len):
+            ## Get the output probabilities for the current step
+            #output = self.forward(features_extended, generated_sequences)
+            #output_probs = torch.softmax(output[:, -1, :], dim=-1)
+
+            ## Multiply the current step's probabilities with the previous steps' accumulated scores (using broadcasting)
+            #scores = sequence_scores + torch.log(output_probs)
+
+
+            #if first_time:
+                #scores_together = scores[:batch_size]
+                #first_time = False
+            #else:
+                ## Now put the results for the same beam together to find the top ones
+                #scores_together = scores.view(batch_size, -1)
+
+
+            ## Reshape the scores to get the top k candidates (beam_size) for each sequence in the batch
+            #top_k_scores, top_k_indices = torch.topk(scores_together, k=beam_size, dim=1)
+
+            #top_k_indices_corrected = top_k_indices % output_probs.size(1)
+            #top_k_indices_starting_sequences = top_k_indices // output_probs.size(1)
+
+            #sequence_indices = torch.squeeze(top_k_indices_starting_sequences, dim=0)
+            #starting_sequences = generated_sequences.index_select(dim=0, index=sequence_indices)
+
+            #top_k_indices_corrected = top_k_indices_corrected.view(batch_size * beam_size, -1)
+            #top_k_scores = top_k_scores.view(batch_size * beam_size, -1)
+
+            #generated_sequences = torch.concat((starting_sequences, top_k_indices_corrected), dim=1)
+            #sequence_scores = top_k_scores
+
+            ## Check if all sequences have reached the end_token_id
+            #if torch.all((top_k_indices_corrected == end_token_id)):
+                #break
+        #scores_reshaped = sequence_scores.view(batch_size, beam_size, -1)
+        #sequences_reshaped = generated_sequences.view(batch_size, beam_size, -1)
+
+        #_, best_indices = scores_reshaped.max(dim=1)
+        #best_sequences = sequences_reshaped[torch.arange(batch_size), best_indices.squeeze(-1)]
+        #return best_sequences
+
+
+    def beam_search(self, features, start_token_id, end_token_id, padding_token_id, max_len=100, beam_size=3):
+
         batch_size = features.size(0)
-        generated_sequences = torch.full((batch_size, 1), start_token_id, dtype=torch.long, device=features.device)
+
+        # Beam options will be processed, as an extension of batch size
+        generated_sequences = torch.full((batch_size * beam_size, 1), start_token_id, dtype=torch.long, device=features.device)
+        features_extended = features.repeat(beam_size, 1)
+        
 
         # Create a tensor to store the scores of each sequence
-        sequence_scores = torch.zeros(batch_size, beam_size).to(features.device)
+        sequence_scores = torch.zeros(batch_size * beam_size, 1).to(features.device)
 
+        # Mask for ended sequences
+        end_mask = torch.full((batch_size * beam_size,), False, dtype=torch.bool, device=features.device)
+
+
+        first_time = True
         for _ in range(max_len):
             # Get the output probabilities for the current step
-            output = self.forward(features, generated_sequences)
+            output = self.forward(features_extended, generated_sequences)
             output_probs = torch.softmax(output[:, -1, :], dim=-1)
 
-            # Multiply the current step's probabilities with the previous steps' accumulated scores
-            scores = sequence_scores.unsqueeze(2) + torch.log(output_probs)
+            # Replace probabilities for ended sequences with 1 for pad token and 0 for other tokens
+            output_probs[end_mask] = torch.eye(output_probs.size(-1), device=features.device)[padding_token_id]
+
+
+            # Multiply the current step's probabilities with the previous steps' accumulated scores (using broadcasting)
+            scores = sequence_scores + torch.log(output_probs)
+
+
+            if first_time:
+                scores_together = scores[:batch_size]
+                first_time = False
+            else:
+                # Now put the results for the same beam together to find the top ones
+                scores_together = scores.view(batch_size, -1)
+
 
             # Reshape the scores to get the top k candidates (beam_size) for each sequence in the batch
-            top_k_scores, top_k_indices = torch.topk(scores.view(batch_size, -1), k=beam_size)
+            top_k_scores, top_k_indices = torch.topk(scores_together, k=beam_size, dim=1)
 
-            # Update the sequence_scores
-            sequence_scores = top_k_scores
+            top_k_indices_corrected = top_k_indices % output_probs.size(1)
+            top_k_indices_starting_sequences = top_k_indices // output_probs.size(1)
 
-            # Compute the new generated_sequences
-            generated_sequences = torch.cat([generated_sequences.repeat_interleave(beam_size, dim=1),
-                                         top_k_indices.view(batch_size, beam_size, 1)], dim=2)
+            sequence_indices = torch.squeeze(top_k_indices_starting_sequences, dim=0)
+            starting_sequences = generated_sequences.index_select(dim=0, index=sequence_indices)
 
-            # Find the features and generated_sequences indices that correspond to the new top k sequences
-            next_features_indices = torch.div(top_k_indices, generated_sequences.size(2)).view(-1)
-            generated_sequences = generated_sequences.view(batch_size * beam_size, -1)
+            top_k_indices_corrected = top_k_indices_corrected.view(batch_size * beam_size, -1)
+            top_k_scores = top_k_scores.view(batch_size * beam_size, -1)
 
-            # Update the features to match the new top k sequences
-            features = features[next_features_indices]
+            generated_sequences = torch.concat((starting_sequences, top_k_indices_corrected), dim=1)
 
-            # Check if all sequences have reached the end_token_id
-            if torch.all((top_k_indices % generated_sequences.size(2) == end_token_id).view(-1)):
-                break
+            # Update end_mask
+            new_end_mask = (top_k_indices_corrected == end_token_id).squeeze(-1)
+            end_mask = end_mask | new_end_mask
 
-        # Remove the initial start_token_id from the generated sequences
-        return generated_sequences[:, 1:].view(batch_size, beam_size, -1)
+            # Update sequence scores only for sequences that did not reach end
+            sequence_scores = sequence_scores.masked_scatter(~end_mask.unsqueeze(-1), top_k_scores)
 
+        scores_reshaped = sequence_scores.view(batch_size, beam_size, -1)
+        sequences_reshaped = generated_sequences.view(batch_size, beam_size, -1)
+
+        _, best_indices = scores_reshaped.max(dim=1)
+        best_sequences = sequences_reshaped[torch.arange(batch_size), best_indices.squeeze(-1)]
+        return best_sequences
 
 # Original Pix2code models
 class P2cVisionModel(nn.Module):
