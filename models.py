@@ -2,6 +2,163 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
+from utils import save_model
+
+
+class Model:
+    def __init__(self, embed_size, device, lr, vocab, label_smoothing=0):
+        self.embed_size = embed_size
+        self.device = device
+        self.lr = lr
+        self.vocab = vocab
+        self.criterion = torch.nn.CrossEntropyLoss(
+            label_smoothing=label_smoothing)
+
+    def init_optimizer(self):
+        self.optimizer = torch.optim.Adam(self.params, lr=self.lr)
+
+
+class LSTMModel(Model):
+    def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr):
+        super().__init__(embed_size, device, lr, vocab)
+        self.model_type = "lstm"
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.encoder = Encoder(embed_size).to(device)
+        self.decoder = Decoder(embed_size, hidden_size,
+                               len(vocab), num_layers).to(device)
+        self.params = list(self.decoder.parameters(
+        )) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
+        self.init_optimizer()
+
+    def eval(self):
+        self.encoder.eval()
+        self.decoder.eval()
+
+    def train(self):
+        self.encoder.train()
+        self.decoder.train()
+
+    def forward_prop_calc_loss(self, images, captions, lengths):
+        targets = torch.nn.utils.rnn.pack_padded_sequence(
+            input=captions, lengths=lengths, batch_first=True)[0]
+        features = self.encoder(images)
+        outputs = self.decoder(features, captions, lengths)
+        loss = self.criterion(outputs, targets)
+        return loss
+
+    def generate_captions(self, images):
+        features = self.encoder(images)
+        predicted_ids = self.decoder.sample(features)
+        return predicted_ids.cpu().data.numpy()
+
+    def save(self, dir, epoch, loss, batch_size):
+        save_model(dir, [self.encoder, self.decoder], self.optimizer,
+                   epoch, loss.item(), batch_size, self.vocab, self.model_type)
+
+
+class Pix2codeModel(Model):
+    def __init__(self, embed_size, vocab, device, lr):
+        super().__init__(embed_size, device, lr, vocab)
+        self.model_type = "pix2code"
+        self.vision_model = P2cVisionModel().to(device)
+        self.language_model = P2cLanguageModel(
+            embed_size, len(vocab)).to(device)
+        self.decoder = P2cDecoder(len(vocab)).to(device)
+        self.params = list(self.vision_model.parameters(
+        )) + list(self.language_model.parameters()) + list(self.decoder.parameters())
+        self.init_optimizer()
+
+    def eval(self):
+        self.vision_model.eval()
+        self.language_model.eval()
+        self.decoder.eval()
+
+    def train(self):
+        self.vision_model.train()
+        self.language_model.train()
+        self.decoder.train()
+
+    def forward_prop_calc_loss(self, images, captions, lengths):
+        encoded_images = self.vision_model(images)
+        partial_captions = captions[:, :-1]
+        target_captions = captions[:, 1:]
+        # Update the lengths list
+        new_lengths = [length - 1 for length in lengths]
+        encoded_texts = self.language_model(partial_captions)
+        outputs = self.decoder(encoded_images, encoded_texts)
+        target_captions_packed = torch.nn.utils.rnn.pack_padded_sequence(
+            target_captions, new_lengths, batch_first=True, enforce_sorted=False).data
+        outputs_packed = torch.nn.utils.rnn.pack_padded_sequence(
+            outputs, new_lengths, batch_first=True, enforce_sorted=False).data
+        loss = self.criterion(outputs_packed, target_captions_packed)
+        return loss
+
+    def generate_captions(self, images):
+        # TODO: not implemeted yet!!
+        pass
+
+    def save(self, dir, epoch, loss, batch_size):
+        save_model(dir, [self.vision_model, self.language_model, self.decoder],
+                   self.optimizer, epoch, loss.item(), batch_size, self.vocab, self.model_type)
+
+
+class TransformerModel(Model):
+    def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr, num_heads):
+        super().__init__(embed_size, device, lr, vocab, label_smoothing=0.1)
+        self.model_type = "transformer"
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.encoder = Encoder(embed_size).to(device)
+        self.decoder = DecoderTransformer(embed_size, hidden_size, len(
+            vocab), num_layers, num_heads).to(device)
+        self.params = list(self.decoder.parameters(
+        )) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
+        self.init_optimizer()
+
+    def train(self):
+        self.encoder.train()
+        self.decoder.train()
+
+    def eval(self):
+        self.encoder.eval()
+        self.decoder.eval()
+
+    def forward_prop_calc_loss(self, images, captions, lengths):
+        features = self.encoder(images)
+        captions_input = captions[:, :-1]
+        captions_expected = captions[:, 1:]
+
+        # add tgt mask
+        tgt_mask = torch.nn.Transformer().generate_square_subsequent_mask(
+            captions_input.size(1)).to(self.device)
+        # add padding mask, real length are in lengths
+        tgt_pad_mask = (captions_input == self.vocab.get_id_by_token(
+            self.vocab.get_padding_token()))
+
+        outputs = self.decoder(features, captions_input,
+                               tgt_mask, tgt_pad_mask)
+        loss = self.criterion(
+            outputs.view(-1, len(self.vocab)), captions_expected.flatten())
+        return loss
+
+    def generate_captions(self, images):
+        features = self.encoder(images)
+
+        start_token_id = self.vocab.get_id_by_token(
+            self.vocab.get_start_token())
+        end_token_id = self.vocab.get_id_by_token(self.vocab.get_end_token())
+        padding_token_id = self.vocab.get_id_by_token(
+            self.vocab.get_padding_token())
+
+        predicted_ids = self.decoder.greedy_search(
+            features, start_token_id, end_token_id, padding_token_id)
+        return predicted_ids.cpu().data.numpy()
+
+    def save(self, dir, epoch, loss, batch_size):
+        save_model(dir, [self.encoder, self.decoder], self.optimizer,
+                   epoch, loss.item(), batch_size, self.vocab, self.model_type)
 
 
 class Decoder(nn.Module):
@@ -50,6 +207,7 @@ class Decoder(nn.Module):
 
         return sampled_ids.squeeze()
 
+
 class Encoder(nn.Module):
 
     def __init__(self, embedding_size):
@@ -74,6 +232,7 @@ class Encoder(nn.Module):
         features = self.BatchNorm(self.linear(features))
         return features
 
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -81,7 +240,8 @@ class PositionalEncoding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float(
+        ) * (-torch.log(torch.tensor(10000.0)) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0).transpose(0, 1)
@@ -91,30 +251,35 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
-# Decoder implementation with Transformer 
+# Decoder implementation with Transformer
+
+
 class DecoderTransformer(nn.Module):
     def __init__(self, embed_size, hidden_size, vocab_size, num_layers, nhead=8, dropout=0.1):
         super(DecoderTransformer, self).__init__()
 
         self.embed_size = embed_size
-        self.embed = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_size)
+        self.embed = nn.Embedding(
+            num_embeddings=vocab_size, embedding_dim=embed_size)
 
         self.pos_enc = PositionalEncoding(embed_size, dropout)
 
-        transformer_decoder_layer = TransformerDecoderLayer(embed_size, nhead, hidden_size, dropout, batch_first=True)
-        self.transformer_decoder = TransformerDecoder(transformer_decoder_layer, num_layers)
+        transformer_decoder_layer = TransformerDecoderLayer(
+            embed_size, nhead, hidden_size, dropout, batch_first=True)
+        self.transformer_decoder = TransformerDecoder(
+            transformer_decoder_layer, num_layers)
 
-        
-
-        self.linear = nn.Linear(in_features=embed_size, out_features=vocab_size)
+        self.linear = nn.Linear(in_features=embed_size,
+                                out_features=vocab_size)
 
     def forward(self, features, tgt, tgt_mask=None, tgt_pad_mask=None):
         target_seq_len = tgt.size(1)
         features = self.preprocess_encoder_features(features, target_seq_len)
-        
+
         tgt = self.embed(tgt)
         tgt = self.pos_enc(tgt)
-        output = self.transformer_decoder(tgt, features, tgt_mask=tgt_mask, tgt_key_padding_mask=tgt_pad_mask)
+        output = self.transformer_decoder(
+            tgt, features, tgt_mask=tgt_mask, tgt_key_padding_mask=tgt_pad_mask)
         output = self.linear(output)
         return output
 
@@ -125,20 +290,24 @@ class DecoderTransformer(nn.Module):
 
     def greedy_search(self, features, start_token_id, end_token_id, padding_token_id, max_len=100):
         batch_size = features.size(0)
-        generated_sequences = torch.full((batch_size, 1), start_token_id, dtype=torch.long, device=features.device)
+        generated_sequences = torch.full(
+            (batch_size, 1), start_token_id, dtype=torch.long, device=features.device)
 
         # Mask for ended sequences
-        end_mask = torch.full((batch_size,), False, dtype=torch.bool, device=features.device)
+        end_mask = torch.full((batch_size,), False,
+                              dtype=torch.bool, device=features.device)
 
         for _ in range(max_len):
             output = self.forward(features, generated_sequences)
 
             # Replace probabilities for ended sequences with 1 for pad token and 0 for other tokens
-            output[end_mask] = torch.eye(output.size(-1), device=output.device)[padding_token_id]
+            output[end_mask] = torch.eye(
+                output.size(-1), device=output.device)[padding_token_id]
 
             _, next_words = torch.max(output[:, -1, :], dim=-1)
             next_words = next_words.unsqueeze(1)
-            generated_sequences = torch.cat((generated_sequences, next_words), dim=1)
+            generated_sequences = torch.cat(
+                (generated_sequences, next_words), dim=1)
 
             # Update end_mask
             new_end_mask = (next_words.squeeze(-1) == end_token_id)
@@ -156,16 +325,17 @@ class DecoderTransformer(nn.Module):
         batch_size = features.size(0)
 
         # Beam options will be processed, as an extension of batch size
-        generated_sequences = torch.full((batch_size * beam_size, 1), start_token_id, dtype=torch.long, device=features.device)
+        generated_sequences = torch.full(
+            (batch_size * beam_size, 1), start_token_id, dtype=torch.long, device=features.device)
         features_extended = features.repeat(beam_size, 1)
-        
 
         # Create a tensor to store the scores of each sequence
-        sequence_scores = torch.zeros(batch_size * beam_size, 1).to(features.device)
+        sequence_scores = torch.zeros(
+            batch_size * beam_size, 1).to(features.device)
 
         # Mask for ended sequences
-        end_mask = torch.full((batch_size * beam_size,), False, dtype=torch.bool, device=features.device)
-
+        end_mask = torch.full((batch_size * beam_size,),
+                              False, dtype=torch.bool, device=features.device)
 
         first_time = True
         for _ in range(max_len):
@@ -174,12 +344,11 @@ class DecoderTransformer(nn.Module):
             output_probs = torch.softmax(output[:, -1, :], dim=-1)
 
             # Replace probabilities for ended sequences with 1 for end token and 0 for other tokens
-            output_probs[end_mask] = torch.eye(output_probs.size(-1), device=features.device)[padding_token_id]
-
+            output_probs[end_mask] = torch.eye(
+                output_probs.size(-1), device=features.device)[padding_token_id]
 
             # Multiply the current step's probabilities with the previous steps' accumulated scores (using broadcasting)
             scores = sequence_scores + torch.log(output_probs)
-
 
             if first_time:
                 scores_together = scores[:batch_size]
@@ -188,38 +357,48 @@ class DecoderTransformer(nn.Module):
                 # Now put the results for the same beam together to find the top ones
                 scores_together = scores.view(batch_size, -1)
 
-
             # Reshape the scores to get the top k candidates (beam_size) for each sequence in the batch
-            top_k_scores, top_k_indices = torch.topk(scores_together, k=beam_size, dim=1)
+            top_k_scores, top_k_indices = torch.topk(
+                scores_together, k=beam_size, dim=1)
 
             top_k_indices_corrected = top_k_indices % output_probs.size(1)
-            top_k_indices_starting_sequences = top_k_indices // output_probs.size(1)
+            top_k_indices_starting_sequences = top_k_indices // output_probs.size(
+                1)
 
-            sequence_indices = torch.squeeze(top_k_indices_starting_sequences, dim=0)
-            starting_sequences = generated_sequences.index_select(dim=0, index=sequence_indices)
+            sequence_indices = torch.squeeze(
+                top_k_indices_starting_sequences, dim=0)
+            starting_sequences = generated_sequences.index_select(
+                dim=0, index=sequence_indices)
 
-            top_k_indices_corrected = top_k_indices_corrected.view(batch_size * beam_size, -1)
+            top_k_indices_corrected = top_k_indices_corrected.view(
+                batch_size * beam_size, -1)
             top_k_scores = top_k_scores.view(batch_size * beam_size, -1)
 
-            generated_sequences = torch.concat((starting_sequences, top_k_indices_corrected), dim=1)
+            generated_sequences = torch.concat(
+                (starting_sequences, top_k_indices_corrected), dim=1)
 
             # Update end_mask
-            end_mask = (top_k_indices_corrected == end_token_id ).squeeze(-1)
+            end_mask = (top_k_indices_corrected == end_token_id).squeeze(-1)
 
             # Update sequence scores only for sequences that did not reach end
-            sequence_scores = sequence_scores.masked_scatter(~end_mask.unsqueeze(-1), top_k_scores)
+            sequence_scores = sequence_scores.masked_scatter(
+                ~end_mask.unsqueeze(-1), top_k_scores)
             # Check if all sequences have reached the end_token_id
             if torch.all(end_mask):
                 break
 
         scores_reshaped = sequence_scores.view(batch_size, beam_size, -1)
-        sequences_reshaped = generated_sequences.view(batch_size, beam_size, -1)
+        sequences_reshaped = generated_sequences.view(
+            batch_size, beam_size, -1)
 
         _, best_indices = scores_reshaped.max(dim=1)
-        best_sequences = sequences_reshaped[torch.arange(batch_size), best_indices.squeeze(-1)]
+        best_sequences = sequences_reshaped[torch.arange(
+            batch_size), best_indices.squeeze(-1)]
         return best_sequences
 
 # Original Pix2code models
+
+
 class P2cVisionModel(nn.Module):
     def __init__(self):
         super(P2cVisionModel, self).__init__()
