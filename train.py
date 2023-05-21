@@ -4,17 +4,16 @@ from vocab import Vocab
 import torch
 from torch.utils.data import DataLoader
 from dataset import Pix2CodeDataset
-from utils import collate_fn, save_model, resnet_img_transformation, original_pix2code_transformation
+from utils import collate_fn, save_model, resnet_img_transformation, original_pix2code_transformation, ids_to_tokens
 from models import Encoder, Decoder, DecoderTransformer, P2cVisionModel, P2cLanguageModel, P2cDecoder
 import numpy as np
 from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
 import datetime
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, OneCycleLR
 from tqdm import tqdm
 
-if __name__ == "__main__":
+def parse_args():
     parser = argparse.ArgumentParser(description='Train the model')
-
     parser.add_argument("--data_path", type=str, default=Path("data", "web", "all_data"), help="Path to the dataset")
     parser.add_argument("--vocab_file_path", type=str, default=None, help="Path to the vocab file")
     parser.add_argument("--cuda", action='store_true', default=False, help="Use cuda or not")
@@ -32,30 +31,43 @@ if __name__ == "__main__":
     parser.add_argument("--early_stopping_patience", type=int, default=5)
     parser.add_argument("--lr_patience", type=int, default=3)
 
-    args = parser.parse_args()
-    args.vocab_file_path = args.vocab_file_path if args.vocab_file_path else Path(Path(args.data_path).parent, "vocab.txt")
+    return parser.parse_args()
+    
+def configure_transform_imgs(model, img_crop_size):
+    if model == "pix2code":
+        return original_pix2code_transformation()
+    else:
+        return resnet_img_transformation(img_crop_size)
 
-    print("Training args:", args)
-
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    if torch.mps:
-        torch.mps.manual_seed(args.seed)
-
-    # Load the vocab file
-    vocab = Vocab(args.vocab_file_path)
-    assert len(vocab) > 0
-
-    # Setup GPU
+def setup_gpu(cuda, mps):
     use_cuda = True if args.cuda and torch.cuda.is_available() else False
     use_mps = True if args.mps and torch.has_mps else False
     assert use_cuda or use_mps # Trust me, you don't want to train this model on a cpu.
-    device = torch.device("cuda" if use_cuda else "mps" if use_mps else "cpu")
+    return torch.device("cuda" if use_cuda else "mps" if use_mps else "cpu"), use_cuda, use_mps
 
-    if args.model == "pix2code":
-        transform_imgs = original_pix2code_transformation()
-    else:
-        transform_imgs = resnet_img_transformation(args.img_crop_size)
+def load_vocab(vocab_file_path, data_path):
+    vocab_file_path = vocab_file_path if vocab_file_path else Path(Path(data_path).parent, "vocab.txt")
+    vocab = Vocab(vocab_file_path)
+    assert len(vocab) > 0
+    return vocab
+
+def set_seeds(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    if torch.mps:
+        torch.mps.manual_seed(seed)
+    return
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    print("Training args:", args)
+
+    set_seeds(args.seed)
+    device, use_cuda, use_mps = setup_gpu(args.cuda, args.mps)
+
+    vocab = load_vocab(args.vocab_file_path, args.data_path)
+    transform_imgs = configure_transform_imgs(args.model, args.img_crop_size)
 
     # Creating the data loader
     train_dataloader = DataLoader(
@@ -120,7 +132,12 @@ if __name__ == "__main__":
     start = datetime.datetime.now()
     print("Start Training date and time: {}".format(start.strftime("%Y-%m-%d %H:%M:%S")))
 
+
+    total_steps = len(train_dataloader) * args.epochs
+    
     # Create a scheduler
+    max_lr = args.lr * 100
+    #scheduler = OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=len(train_dataloader), epochs=args.epochs, anneal_strategy='linear')
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=args.lr_patience, verbose=True)
 
     # Initialize variables for early stopping
@@ -162,7 +179,6 @@ if __name__ == "__main__":
 
             elif args.model == "transformer":
                 features = encoder(images)
-                #outputs = decoder(features, captions[:, :-1])
                 captions_input = captions[:,:-1]
                 captions_expected = captions[:,1:]
 
@@ -170,16 +186,15 @@ if __name__ == "__main__":
                 # add padding mask, real length are in lengths
                 tgt_mask = torch.nn.Transformer().generate_square_subsequent_mask(captions_input.size(1)).to(device)
                 tgt_pad_mask = (captions_input == vocab.get_id_by_token(vocab.get_padding_token()))
-        
-        
 
                 outputs = decoder(features, captions_input, tgt_mask, tgt_pad_mask)
-                #loss = criterion(outputs.view(-1, len(vocab)), captions.flatten())
                 loss = criterion(outputs.view(-1, len(vocab)), captions_expected.flatten())
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            #scheduler.step()
 
             # Update the progress bar
             train_loop.set_postfix(loss=loss.item())
@@ -206,14 +221,14 @@ if __name__ == "__main__":
                     generated_caption_ids = decoder.sample(features)
                     generated_caption_ids= sample_ids.cpu().data.numpy()
                 elif args.model == "transformer":
-                    sample_ids = decoder.greedy_search(features, start_token_id, end_token_id)
+                    sample_ids = decoder.greedy_search(features, start_token_id, end_token_id, padding_token_id)
                     generated_caption_ids= sample_ids.cpu().data.numpy()
 
                 gen_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in generated_caption_ids]
                 gt_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in captions.tolist()]
 
                 # Remove start, end and padding tokens from the generated and ground truth captions
-                list_start_end_padding_tokens = [vocab.get_start_token(), vocab.get_end_token(), vocab.get_padding_token()]
+                list_start_end_padding_tokens = [vocab.get_start_token(), vocab.get_end_token(), vocab.get_padding_token(), ","]
                 gen_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in gen_caption_text]
                 gt_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in gt_caption_text]
 
@@ -224,14 +239,13 @@ if __name__ == "__main__":
 
                     bleu_scores.append(bleu_score)
 
-
                 # Update the progress bar
                 eval_loop.set_postfix(val_bleu_score=np.mean(bleu_scores))
 
         avg_bleu_score = np.mean(bleu_scores)
 
         # Update the learning rate based on validation BLEU score
-        scheduler.step(avg_bleu_score)
+        # scheduler.step(avg_bleu_score)
 
         # Early stopping condition
         if avg_bleu_score > best_bleu_score:
@@ -240,16 +254,16 @@ if __name__ == "__main__":
         else:
             epochs_without_improvement += 1
 
-        #if epochs_without_improvement >= args.early_stopping_patience:
-            #print("Stopping training early due to lack of improvement in validation BLEU score.")
-            #break
+        if epoch >= 15 and epochs_without_improvement >= args.early_stopping_patience:
+            print("Stopping training early due to lack of improvement in validation BLEU score.")
+            break
 
         print("Epoch: {}/{}, Loss: {:.3f}, Val BLEU Score: {:03f}".format(epoch, args.epochs, loss.item(), avg_bleu_score))
         if epoch != 0 and epoch % args.save_after_epochs == 0:
             if args.model == "pix2code":
-                save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
+                save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model, args.lr)
             else:
-                save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
+                save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model, args.lr)
 
             print("Saved model checkpoint")
 
@@ -259,9 +273,9 @@ if __name__ == "__main__":
     print("End Training date and time: {}, elapsed time  : {:02d}:{:02d}:{:02d}".format(end.strftime("%Y-%m-%d %H:%M:%S"), elapsed_time//3600, (elapsed_time%3600)//60, elapsed_time%60))
 
     if args.model == "pix2code":
-        save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
+        save_model(args.models_dir, [vision_model, language_model, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model, args.lr)
     else:
-        save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model)
+        save_model(args.models_dir, [encoder, decoder], optimizer, epoch, loss.item(), args.batch_size, vocab, args.model, args.lr)
     print("Saved final model")
 
 

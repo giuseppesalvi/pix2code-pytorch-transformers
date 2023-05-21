@@ -57,7 +57,7 @@ def original_pix2code_transformation():
     return transforms.Compose([transforms.Resize((256, 256)),
                                transforms.ToTensor()])
 
-def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vocab, model_type):
+def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vocab, model_type, lr):
     if model_type == "pix2code":
         vision_model, language_model, decoder = model
     else:
@@ -77,6 +77,7 @@ def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vo
                 'language_model_state_dict': encoder.state_dict(),
                 'decoder_model_state_dict': decoder.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'lr': lr,
                 'loss': loss,
                 'vocab': vocab
                 }, MODEL_PATH)
@@ -85,6 +86,7 @@ def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vo
                 'encoder_model_state_dict': encoder.state_dict(),
                 'decoder_model_state_dict': decoder.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'lr': lr,
                 'loss': loss,
                 'vocab': vocab
                 }, MODEL_PATH)
@@ -115,7 +117,7 @@ def ids_to_tokens(vocab, ids):
 
         if token == vocab.get_end_token():
             break
-        if token == vocab.get_start_token() or token == ',':
+        if token == vocab.get_start_token() or token == vocab.get_padding_token() or token == ',':
             continue
 
         tokens.append(token)

@@ -7,7 +7,7 @@ from torchvision import transforms
 from dataset import Pix2CodeDataset
 from utils import collate_fn, save_model, ids_to_tokens, generate_visualization_object, resnet_img_transformation, original_pix2code_transformation
 from models import Encoder, Decoder, DecoderTransformer
-from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import math
 from tqdm import tqdm
 import numpy as np
@@ -63,16 +63,6 @@ if __name__ == "__main__":
         num_workers=0,
         drop_last=True)
 
-    # Creating the data loader
-    #test_dataloader = DataLoader(
-        #Pix2CodeDataset(args.data_path, "test", vocab, transform=transform_imgs),
-        #batch_size=args.batch_size,
-        #collate_fn=lambda data: collate_fn(data, vocab=vocab),
-        #pin_memory=True if use_cuda or use_mps else False,
-        #num_workers=0,
-        #drop_last=True)
-
-
     if args.model == "lstm":
         # Loading the model
         embed_size = 256
@@ -127,19 +117,15 @@ if __name__ == "__main__":
         end_token_id = vocab.get_id_by_token(vocab.get_end_token())
         padding_token_id = vocab.get_id_by_token(vocab.get_padding_token())
                 
-        #sample_ids = decoder.sample(features)
-        #sample_ids = sample_ids.cpu().data.numpy()
-        
         if args.model == "lstm":
             generated_caption_ids = decoder.sample(features)
-            generated_caption_ids= generated_caption_ids.cpu().data.numpy()
         elif args.model == "transformer":
             if args.beam_search:
                 generated_caption_ids = decoder.beam_search(features, start_token_id, end_token_id, padding_token_id, beam_size=args.beam_size)
             else:
-                generated_caption_ids = decoder.greedy_search(features, start_token_id, end_token_id)
-            generated_caption_ids= generated_caption_ids[0].cpu().data.numpy()
-
+                generated_caption_ids = decoder.greedy_search(features, start_token_id, end_token_id, padding_token_id)
+        
+        generated_caption_ids= generated_caption_ids[0].cpu().data.numpy()
         predictions.append(generated_caption_ids)
         targets.append(caption.cpu().data.numpy())
 
@@ -149,30 +135,18 @@ if __name__ == "__main__":
     elapsed_time = (end - start).seconds
     print("End Evaluation date and time: {}, elapsed time  : {:02d}:{:02d}:{:02d}".format(end.strftime("%Y-%m-%d %H:%M:%S"), elapsed_time//3600, (elapsed_time%3600)//60, elapsed_time%60))
 
-
     predictions = [ids_to_tokens(vocab, prediction) for prediction in predictions]
     targets = [ids_to_tokens(vocab, target) for target in targets]
 
-    with open("prediction3.txt", "w") as f:
-        for pred in predictions:
-            print(pred, file=f)
-            print("\n")
-
-
-    with open("targets3.txt", "w") as f:
-        for targ in targets:
-            print(targ, file=f)
-            print("\n")
-
-    # Remove start, end and padding tokens from the generated and ground truth captions
-    list_start_end_padding_tokens = [vocab.get_start_token(), vocab.get_end_token(), vocab.get_padding_token()]
-    gen_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in predictions]
-    gt_caption_text= [[word for word in batch if word not in list_start_end_padding_tokens] for batch in targets]
-
-
+    # DBG
+    #with open("predictions_beam_4.txt", "w") as f:
+        #for pred in predictions:
+            #print(pred, file=f)
+            #print("\n", file=f)
+            
     bleu_scores = []
-    for gt_caption, gen_caption in zip(gt_caption_text, gen_caption_text):
-        bleu_score = corpus_bleu([[gt_caption]], [gen_caption], smoothing_function=SmoothingFunction().method4)
+    for gt_caption, gen_caption in zip(targets, predictions):
+        bleu_score = sentence_bleu([gt_caption], gen_caption, smoothing_function=SmoothingFunction().method4)
         bleu_scores.append(bleu_score)
 
     print("BLEU score: {}".format(np.mean(bleu_scores)))
