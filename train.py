@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import Pix2CodeDataset
 from utils import collate_fn, resnet_img_transformation, original_pix2code_transformation
-from models import TransformerModel, LSTMModel, Pix2codeModel
+from models import configure_model 
 import numpy as np
 from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
 import datetime
@@ -69,27 +69,7 @@ def set_seed(seed):
     return
 
 
-def configure_model(model_type, vocab, device, lr):
-    if model_type == "lstm":
-        embed_size = 256
-        hidden_size = 512
-        num_layers = 1
-        return LSTMModel(embed_size, hidden_size, vocab, num_layers, device, lr)
-
-    elif model_type == "pix2code":
-        embed_size = 256
-        return Pix2codeModel(embed_size, vocab, device, lr)
-
-    elif model_type == "transformer":
-        embed_size = 256
-        hidden_size = 512
-        num_layers = 6
-        num_heads = 8
-        return TransformerModel(embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups=args.num_warmups)
-
-
 def create_data_loaders(data_path, vocab, transform_imgs, batch_size, pin_memory):
-    # Creating the data loader
     train_dataloader = DataLoader(
         Pix2CodeDataset(data_path, "train", vocab, transform=transform_imgs),
         batch_size=batch_size,
@@ -98,7 +78,6 @@ def create_data_loaders(data_path, vocab, transform_imgs, batch_size, pin_memory
         num_workers=0,
         drop_last=True)
 
-    # Creating the data loader
     valid_dataloader = DataLoader(
         Pix2CodeDataset(data_path, "validation", vocab,
                         transform=transform_imgs),
@@ -113,6 +92,7 @@ def create_data_loaders(data_path, vocab, transform_imgs, batch_size, pin_memory
 
 
 if __name__ == "__main__":
+
     # Configure training
     args = parse_args()
 

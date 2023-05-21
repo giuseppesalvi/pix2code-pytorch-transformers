@@ -4,6 +4,24 @@ import torchvision.models as models
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
 from utils import save_model, NoamOpt
 
+def configure_model(model_type, vocab, device, lr):
+    if model_type == "lstm":
+        embed_size = 256
+        hidden_size = 512
+        num_layers = 1
+        return LSTMModel(embed_size, hidden_size, vocab, num_layers, device, lr)
+
+    elif model_type == "pix2code":
+        embed_size = 256
+        return Pix2codeModel(embed_size, vocab, device, lr)
+
+    elif model_type == "transformer":
+        embed_size = 256
+        hidden_size = 512
+        num_layers = 6
+        num_heads = 8
+        return TransformerModel(embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups=args.num_warmups)
+
 class Model:
     def __init__(self, embed_size, device, lr, vocab, label_smoothing=0):
         self.embed_size = embed_size
@@ -64,6 +82,9 @@ class LSTMModel(Model):
     def step_optimizer_or_scheduler(self):
         self.optimizer.step()
 
+    def load_weights(self, loaded_model):
+        self.encoder.load_state_dict(loaded_model["encoder_model_state_dict"])
+        self.decoder.load_state_dict(loaded_model["decoder_model_state_dict"])
 
 class Pix2codeModel(Model):
     def __init__(self, embed_size, vocab, device, lr):
@@ -118,6 +139,11 @@ class Pix2codeModel(Model):
 
     def step_optimizer_or_scheduler(self):
         self.optimizer.step()
+
+    def load_weights(self, loaded_model):
+        self.vision_model.load_state_dict(loaded_model["vision_model_state_dict"])
+        self.language_model.load_state_dict(loaded_model["language_model_state_dict"])
+        self.decoder.load_state_dict(loaded_model["decoder_model_state_dict"])
 
 class TransformerModel(Model):
     def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups, optim_params_separated=True):
@@ -208,6 +234,9 @@ class TransformerModel(Model):
     def step_optimizer_or_scheduler(self):
         self.scheduler.step()  
 
+    def load_weights(self, loaded_model):
+        self.encoder.load_state_dict(loaded_model["encoder_model_state_dict"])
+        self.decoder.load_state_dict(loaded_model["decoder_model_state_dict"])
 
 class Decoder(nn.Module):
 
