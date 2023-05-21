@@ -4,13 +4,13 @@ from vocab import Vocab
 import torch
 from torch.utils.data import DataLoader
 from dataset import Pix2CodeDataset
-from utils import collate_fn, save_model, resnet_img_transformation, original_pix2code_transformation, ids_to_tokens
+from utils import collate_fn, resnet_img_transformation, original_pix2code_transformation
 from models import TransformerModel, LSTMModel, Pix2codeModel
 import numpy as np
 from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
 import datetime
-from torch.optim.lr_scheduler import ReduceLROnPlateau, OneCycleLR
 from tqdm import tqdm
+import wandb
 
 
 def parse_args():
@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument("--model_type", type=str, default="lstm", help="Choose the model to use", choices=["lstm", "transformer", "pix2code"])
     parser.add_argument("--early_stopping_patience", type=int, default=5)
     parser.add_argument("--lr_patience", type=int, default=3)
+    parser.add_argument("--num_warmups", type=int, default=4000, help="number of warmups for training of transformer model")
 
     args = parser.parse_args()
     print("Training args:", args)
@@ -45,8 +46,8 @@ def configure_transform_imgs(model_type, img_crop_size):
 
 
 def setup_gpu(cuda, mps):
-    use_cuda = True if args.cuda and torch.cuda.is_available() else False
-    use_mps = True if args.mps and torch.has_mps else False
+    use_cuda = True if cuda and torch.cuda.is_available() else False
+    use_mps = True if mps and torch.has_mps else False
     # Trust me, you don't want to train this model on a cpu.
     assert use_cuda or use_mps
     return torch.device("cuda" if use_cuda else "mps" if use_mps else "cpu"), use_cuda, use_mps
@@ -84,7 +85,7 @@ def configure_model(model_type, vocab, device, lr):
         hidden_size = 512
         num_layers = 6
         num_heads = 8
-        return TransformerModel(embed_size, hidden_size, vocab, num_layers, device, lr, num_heads)
+        return TransformerModel(embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups=args.num_warmups)
 
 
 def create_data_loaders(data_path, vocab, transform_imgs, batch_size, pin_memory):
@@ -127,19 +128,18 @@ if __name__ == "__main__":
 
     model = configure_model(args.model_type, vocab, device, lr)
 
+
+    # Initialize wandb run
+    config = model.config
+    config["epochs"] = args.epochs
+    config["batch"] = args.batch_size
+    run = wandb.init(project="Pix2Code_" + args.model_type, config=config)
+
     # Log start date and time
     start = datetime.datetime.now()
     print("Start Training date and time: {}".format(
         start.strftime("%Y-%m-%d %H:%M:%S")))
 
-    total_steps = len(train_dataloader) * args.epochs
-
-    # Create a scheduler TODO!!!
-    #max_lr = lr * 100
-    #print("lr=", lr)
-    #print("max_lr=", max_lr)
-    # TODOscheduler = OneCycleLR(optimizer, max_lr=max_lr, steps_per_epoch=len(train_dataloader), epochs=args.epochs, anneal_strategy='linear')
-    #scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=args.lr_patience, verbose=True)
 
     # Initialize variables for early stopping
     epochs_without_improvement = 0
@@ -160,7 +160,8 @@ if __name__ == "__main__":
 
             model.optimizer.zero_grad()
             loss.backward()
-            model.optimizer.step()
+
+            model.step_optimizer_or_scheduler()
 
             # Update the progress bar
             train_loop.set_postfix(loss=loss.item())
@@ -203,28 +204,26 @@ if __name__ == "__main__":
 
         avg_bleu_score = np.mean(bleu_scores)
 
-        # Update the learning rate based on validation BLEU score
-        # scheduler.step(avg_bleu_score)
-        # TODO
-        # scheduler.step()
-
         # Early stopping condition
-        if avg_bleu_score > best_bleu_score:
-            best_bleu_score = avg_bleu_score
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
+        #if avg_bleu_score > best_bleu_score:
+            #best_bleu_score = avg_bleu_score
+            #epochs_without_improvement = 0
+        #else:
+            #epochs_without_improvement += 1
 
-        if epoch >= 15 and epochs_without_improvement >= args.early_stopping_patience:
-            print(
-                "Stopping training early due to lack of improvement in validation BLEU score.")
-            break
+        #if epoch >= 15 and epochs_without_improvement >= args.early_stopping_patience:
+            #print(
+                #"Stopping training early due to lack of improvement in validation BLEU score.")
+            #break
 
-        print("Epoch: {}/{}, Loss: {:.3f}, Val BLEU Score: {:03f}".format(epoch,
-              args.epochs, loss.item(), avg_bleu_score))
         if epoch != 0 and epoch % args.save_after_epochs == 0:
-            model.save(args.models_dir, epoch, loss, args.batch_size)
+            model.save(args.models_dir, epoch, loss, avg_bleu_score, args.batch_size)
             print("Saved model checkpoint")
+
+        print("Epoch: {}/{}, Loss: {:.3f}, Bleu: {:03f}".format(epoch, args.epochs, loss.item(), avg_bleu_score))
+        wandb.log({"loss": loss.item(), "bleu": avg_bleu_score, **{f'lr_{i}': param_group['lr'] for i, param_group in enumerate(model.optimizer.param_groups)}})
+
+
 
     # Log end date and time elapsed time from start
     end = datetime.datetime.now()
@@ -232,5 +231,5 @@ if __name__ == "__main__":
     print("End Training date and time: {}, elapsed time  : {:02d}:{:02d}:{:02d}".format(end.strftime(
         "%Y-%m-%d %H:%M:%S"), elapsed_time//3600, (elapsed_time % 3600)//60, elapsed_time % 60))
 
-    model.save(args.models_dir, epoch, loss, args.batch_size)
+    model.save(args.models_dir, epoch, loss, avg_bleu_score, args.batch_size)
     print("Saved final model")

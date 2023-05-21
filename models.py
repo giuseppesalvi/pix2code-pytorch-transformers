@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
-from utils import save_model
-
+from utils import save_model, NoamOpt
 
 class Model:
     def __init__(self, embed_size, device, lr, vocab, label_smoothing=0):
@@ -13,9 +12,6 @@ class Model:
         self.vocab = vocab
         self.criterion = torch.nn.CrossEntropyLoss(
             label_smoothing=label_smoothing)
-
-    def init_optimizer(self):
-        self.optimizer = torch.optim.Adam(self.params, lr=self.lr)
 
 
 class LSTMModel(Model):
@@ -29,7 +25,16 @@ class LSTMModel(Model):
                                len(vocab), num_layers).to(device)
         self.params = list(self.decoder.parameters(
         )) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
-        self.init_optimizer()
+
+        self.optimizer = torch.optim.Adam(self.params, lr=self.lr)
+
+        self.config = {
+            "hidden_size": hidden_size,
+            "num_layers": num_layers,
+            "embed_size": embed_size,
+            "hidden_size": hidden_size,
+            "lr": lr,
+        }
 
     def eval(self):
         self.encoder.eval()
@@ -52,9 +57,12 @@ class LSTMModel(Model):
         predicted_ids = self.decoder.sample(features)
         return predicted_ids.cpu().data.numpy()
 
-    def save(self, dir, epoch, loss, batch_size):
+    def save(self, dir, epoch, loss, bleu, batch_size):
         save_model(dir, [self.encoder, self.decoder], self.optimizer,
-                   epoch, loss.item(), batch_size, self.vocab, self.model_type)
+                   epoch, loss.item(), bleu, batch_size, self.vocab, self.model_type, self.lr)
+    
+    def step_optimizer_or_scheduler(self):
+        self.optimizer.step()
 
 
 class Pix2codeModel(Model):
@@ -67,7 +75,13 @@ class Pix2codeModel(Model):
         self.decoder = P2cDecoder(len(vocab)).to(device)
         self.params = list(self.vision_model.parameters(
         )) + list(self.language_model.parameters()) + list(self.decoder.parameters())
-        self.init_optimizer()
+
+        self.optimizer = torch.optim.Adam(self.params, lr=self.lr)
+
+        self.config = {
+            "embed_size": embed_size,
+            "lr": lr,
+        }
 
     def eval(self):
         self.vision_model.eval()
@@ -98,13 +112,15 @@ class Pix2codeModel(Model):
         # TODO: not implemeted yet!!
         pass
 
-    def save(self, dir, epoch, loss, batch_size):
+    def save(self, dir, epoch, loss, bleu, batch_size):
         save_model(dir, [self.vision_model, self.language_model, self.decoder],
-                   self.optimizer, epoch, loss.item(), batch_size, self.vocab, self.model_type)
+                   self.optimizer, epoch, loss.item(), bleu, batch_size, self.vocab, self.model_type, self.lr)
 
+    def step_optimizer_or_scheduler(self):
+        self.optimizer.step()
 
 class TransformerModel(Model):
-    def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr, num_heads):
+    def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups, optim_params_separated=True):
         super().__init__(embed_size, device, lr, vocab, label_smoothing=0.1)
         self.model_type = "transformer"
         self.hidden_size = hidden_size
@@ -113,9 +129,38 @@ class TransformerModel(Model):
         self.encoder = Encoder(embed_size).to(device)
         self.decoder = DecoderTransformer(embed_size, hidden_size, len(
             vocab), num_layers, num_heads).to(device)
-        self.params = list(self.decoder.parameters(
-        )) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
-        self.init_optimizer()
+
+        # All parameters together
+        self.params = list(self.decoder.parameters()) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
+
+        # Parameters in two separated groups, one for decoder, one for encoder
+        decoder_params = list(self.decoder.parameters())
+        encoder_params = list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
+
+        if optim_params_separated:
+            # Transformer decoder and Encoder params separated, warmup applied only on transformer
+            self.optimizer = torch.optim.Adam([
+                {'params': decoder_params, 'lr': 0, 'betas': (0.9, 0.98), 'eps': 1e-9},
+                {'params': encoder_params, 'lr': lr}
+            ])
+        else:
+            # All parameters together 
+            self.params = decoder_params + encoder_params 
+            self.optimizer = torch.optim.Adam(self.params, lr=0, betas=(0.9, 0.98), eps=1e-9)
+
+        self.scheduler = NoamOpt(self.embed_size, 1, num_warmups, self.optimizer)
+
+        self.config = {
+            "hidden_size": hidden_size,
+            "num_layers": num_layers,
+            "num_heads": num_heads,
+            "embed_size": embed_size,
+            "hidden_size": hidden_size,
+            "num_warmups": num_warmups,
+            "optim_params_separated": optim_params_separated,
+            "encoder_lr": lr,
+        }
+
 
     def train(self):
         self.encoder.train()
@@ -156,9 +201,12 @@ class TransformerModel(Model):
             features, start_token_id, end_token_id, padding_token_id)
         return predicted_ids.cpu().data.numpy()
 
-    def save(self, dir, epoch, loss, batch_size):
+    def save(self, dir, epoch, loss, bleu, batch_size):
         save_model(dir, [self.encoder, self.decoder], self.optimizer,
-                   epoch, loss.item(), batch_size, self.vocab, self.model_type)
+                   epoch, loss.item(), bleu, batch_size, self.vocab, self.model_type, self.lr)
+
+    def step_optimizer_or_scheduler(self):
+        self.scheduler.step()  
 
 
 class Decoder(nn.Module):

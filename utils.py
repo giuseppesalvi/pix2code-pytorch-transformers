@@ -57,7 +57,7 @@ def original_pix2code_transformation():
     return transforms.Compose([transforms.Resize((256, 256)),
                                transforms.ToTensor()])
 
-def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vocab, model_type, lr):
+def save_model(models_folder_path, model, optimizer, epoch, loss, bleu, batch_size, vocab, model_type, lr):
     if model_type == "pix2code":
         vision_model, language_model, decoder = model
     else:
@@ -69,7 +69,7 @@ def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vo
     MODELS_FOLDER.mkdir(parents=True, exist_ok=True)
 
     MODEL_PATH = MODELS_FOLDER / (model_name_formated("e-d-model-" + model_type,
-                                  {"epoch": epoch, "loss": loss, "batch": batch_size}) + ".pth")
+                                  {"epoch": epoch, "loss": loss, "bleu": bleu, "batch": batch_size}) + ".pth")
 
     if model_type == "pix2code":
         torch.save({'epoch': epoch,
@@ -79,6 +79,7 @@ def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vo
                 'optimizer_state_dict': optimizer.state_dict(),
                 'lr': lr,
                 'loss': loss,
+                'bleu': bleu,
                 'vocab': vocab
                 }, MODEL_PATH)
     else:
@@ -88,6 +89,7 @@ def save_model(models_folder_path, model, optimizer, epoch, loss, batch_size, vo
                 'optimizer_state_dict': optimizer.state_dict(),
                 'lr': lr,
                 'loss': loss,
+                'bleu': bleu,
                 'vocab': vocab
                 }, MODEL_PATH)
 
@@ -135,3 +137,35 @@ def generate_visualization_object(dataset, predictions, targets):
 
     with open(Path("tmp_viz_obj").with_suffix(".pkl"), "wb") as writer:
         pickle.dump(vis_obj, writer, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+class NoamOpt:
+    "Optim wrapper that implements rate."
+    def __init__(self, model_size, factor, warmup, optimizer):
+        self.optimizer = optimizer
+        self._step = 0
+        self.warmup = warmup
+        self.factor = factor
+        self.model_size = model_size
+        self._rate = 0
+        
+    def step(self):
+        "Update parameters and rate"
+        self._step += 1
+        rate = self.rate()
+
+        #for p in self.optimizer.param_groups:
+            #p['lr'] = rate
+        # Do this only in the first group of parameters (Transformer decoder)
+        self.optimizer.param_groups[0]['lr'] = rate
+
+        self._rate = rate
+        self.optimizer.step()
+        
+    def rate(self, step = None):
+        "Implement `lrate` above"
+        if step is None:
+            step = self._step
+        return self.factor * \
+            (self.model_size ** (-0.5) *
+            min(step ** (-0.5), step * self.warmup ** (-1.5)))
