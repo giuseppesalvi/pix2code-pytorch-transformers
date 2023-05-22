@@ -82,7 +82,7 @@ def create_data_loader(data_path, vocab, transform_imgs, batch_size, pin_memory)
 
 if __name__ == "__main__":
 
-    # Configure training
+    # Configure testing 
     args = parse_args()
 
     set_seed(args.seed)
@@ -117,7 +117,7 @@ if __name__ == "__main__":
         caption = caption.to(device)
 
 
-        generated_captions_ids = model.generate_captions(image)
+        generated_caption_ids = model.generate_captions(image)
 
         gen_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in generated_caption_ids]
         gt_caption_text = [[vocab.get_token_by_id(word_id) for word_id in batch] for batch in captions.tolist()]

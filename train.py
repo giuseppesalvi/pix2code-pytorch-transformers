@@ -31,7 +31,6 @@ def parse_args():
     parser.add_argument("--model_type", type=str, default="lstm", help="Choose the model to use", choices=["lstm", "transformer", "pix2code"])
     parser.add_argument("--early_stopping_patience", type=int, default=5)
     parser.add_argument("--lr_patience", type=int, default=3)
-    parser.add_argument("--num_warmups", type=int, default=4000, help="number of warmups for training of transformer model")
 
     args = parser.parse_args()
     print("Training args:", args)
