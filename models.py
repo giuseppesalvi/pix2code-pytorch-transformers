@@ -4,23 +4,30 @@ import torchvision.models as models
 from torch.nn import TransformerDecoder, TransformerDecoderLayer
 from utils import save_model, NoamOpt
 
-def configure_model(model_type, vocab, device, lr):
+def configure_model(model_type, vocab, device, config):
     if model_type == "lstm":
-        embed_size = 256
-        hidden_size = 512
-        num_layers = 1
+        lr= config["lr"] if config["lr"] else 1e-5 
+        embed_size = config["embed_size"] if config["embed_size"] else 256
+        hidden_size = config["hidden_size"] if config["hidden_size"] else 512
+        num_layers = config["num_layers"] if config["num_layers"] else 1
         return LSTMModel(embed_size, hidden_size, vocab, num_layers, device, lr)
 
     elif model_type == "pix2code":
-        embed_size = 256
+        lr= config["lr"] if config["lr"] else 1e-5 
+        embed_size = config["embed_size"] if config["embed_size"] else 256
         return Pix2codeModel(embed_size, vocab, device, lr)
 
     elif model_type == "transformer":
-        embed_size = 256
-        hidden_size = 512
-        num_layers = 6
+        #lr= config["lr"] if config["lr"] else 1e-5 
+        lr = 1e-5
+        embed_size = config["embed_size"] if config["embed_size"] else 256
+        hidden_size = config["hidden_size"] if config["hidden_size"] else 512
+        num_layers = config["num_layers"] if config["num_layers"] else 3
+        #num_heads = config["num_heads"] if config["num_heads"] else 8
         num_heads = 8
-        return TransformerModel(embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups=args.num_warmups)
+        num_warmups = config["num_warmups"] if config["num_warmups"] else 1000
+        optim_params_separated = config["optim_params_separated"] if config["optim_params_separated"] else True
+        return TransformerModel(embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups=num_warmups, optim_params_separated=optim_params_separated)
 
 class Model:
     def __init__(self, embed_size, device, lr, vocab, label_smoothing=0):
@@ -45,14 +52,6 @@ class LSTMModel(Model):
         )) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
 
         self.optimizer = torch.optim.Adam(self.params, lr=self.lr)
-
-        self.config = {
-            "hidden_size": hidden_size,
-            "num_layers": num_layers,
-            "embed_size": embed_size,
-            "hidden_size": hidden_size,
-            "lr": lr,
-        }
 
     def eval(self):
         self.encoder.eval()
@@ -99,11 +98,6 @@ class Pix2codeModel(Model):
 
         self.optimizer = torch.optim.Adam(self.params, lr=self.lr)
 
-        self.config = {
-            "embed_size": embed_size,
-            "lr": lr,
-        }
-
     def eval(self):
         self.vision_model.eval()
         self.language_model.eval()
@@ -146,15 +140,15 @@ class Pix2codeModel(Model):
         self.decoder.load_state_dict(loaded_model["decoder_model_state_dict"])
 
 class TransformerModel(Model):
-    def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups, optim_params_separated=True):
+    def __init__(self, embed_size, hidden_size, vocab, num_layers, device, lr, num_heads, num_warmups, optim_params_separated=False):
         super().__init__(embed_size, device, lr, vocab, label_smoothing=0.1)
         self.model_type = "transformer"
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.encoder = Encoder(embed_size).to(device)
-        self.decoder = DecoderTransformer(embed_size, hidden_size, len(
-            vocab), num_layers, num_heads).to(device)
+        self.decoder = DecoderTransformer(embed_size, hidden_size, len(vocab), num_layers, num_heads).to(device)
+        self.num_warmups = num_warmups
 
         # All parameters together
         self.params = list(self.decoder.parameters()) + list(self.encoder.linear.parameters()) + list(self.encoder.BatchNorm.parameters())
@@ -174,19 +168,8 @@ class TransformerModel(Model):
             self.params = decoder_params + encoder_params 
             self.optimizer = torch.optim.Adam(self.params, lr=0, betas=(0.9, 0.98), eps=1e-9)
 
-        self.scheduler = NoamOpt(self.embed_size, 1, num_warmups, self.optimizer)
-
-        self.config = {
-            "hidden_size": hidden_size,
-            "num_layers": num_layers,
-            "num_heads": num_heads,
-            "embed_size": embed_size,
-            "hidden_size": hidden_size,
-            "num_warmups": num_warmups,
-            "optim_params_separated": optim_params_separated,
-            "encoder_lr": lr,
-        }
-
+        noam_opt_factor = 2
+        self.scheduler = NoamOpt(self.embed_size, noam_opt_factor, self.num_warmups, self.optimizer)
 
     def train(self):
         self.encoder.train()
@@ -336,18 +319,14 @@ class DecoderTransformer(nn.Module):
         super(DecoderTransformer, self).__init__()
 
         self.embed_size = embed_size
-        self.embed = nn.Embedding(
-            num_embeddings=vocab_size, embedding_dim=embed_size)
+        self.embed = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_size)
 
         self.pos_enc = PositionalEncoding(embed_size, dropout)
 
-        transformer_decoder_layer = TransformerDecoderLayer(
-            embed_size, nhead, hidden_size, dropout, batch_first=True)
-        self.transformer_decoder = TransformerDecoder(
-            transformer_decoder_layer, num_layers)
+        transformer_decoder_layer = TransformerDecoderLayer(embed_size, nhead, hidden_size, dropout, batch_first=True)
+        self.transformer_decoder = TransformerDecoder(transformer_decoder_layer, num_layers)
 
-        self.linear = nn.Linear(in_features=embed_size,
-                                out_features=vocab_size)
+        self.linear = nn.Linear(in_features=embed_size,out_features=vocab_size)
 
     def forward(self, features, tgt, tgt_mask=None, tgt_pad_mask=None):
         target_seq_len = tgt.size(1)
@@ -355,8 +334,7 @@ class DecoderTransformer(nn.Module):
 
         tgt = self.embed(tgt)
         tgt = self.pos_enc(tgt)
-        output = self.transformer_decoder(
-            tgt, features, tgt_mask=tgt_mask, tgt_key_padding_mask=tgt_pad_mask)
+        output = self.transformer_decoder(tgt, features, tgt_mask=tgt_mask, tgt_key_padding_mask=tgt_pad_mask)
         output = self.linear(output)
         return output
 

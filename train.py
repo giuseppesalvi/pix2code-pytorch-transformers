@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=2020, help="The random seed for reproducing")
     parser.add_argument("--model_type", type=str, default="lstm", help="Choose the model to use", choices=["lstm", "transformer", "pix2code"])
     parser.add_argument("--early_stopping_patience", type=int, default=5)
-    parser.add_argument("--lr_patience", type=int, default=3)
+    parser.add_argument("--sweep", action='store_true',default=False, help="sweep to find hyperparameters")
 
     args = parser.parse_args()
     print("Training args:", args)
@@ -89,36 +89,60 @@ def create_data_loaders(data_path, vocab, transform_imgs, batch_size, pin_memory
     print("Created data loaders")
     return train_dataloader, valid_dataloader
 
+def init_model_config(model_type, lr, batch_size):
+    config = {}
+    if model_type == "transformer":
+        config["lr"] = lr 
+        config["batch_size"] = batch_size 
+        config["embed_size"] = 256
+        config["hidden_size"] = 512
+        config["num_layers"] = 2#3
+        config["num_heads"] = 8
+        config["num_warmups"] = 0 
+        config["optim_params_separated"] = True
+    else:
+        # TODO
+        pass
 
-if __name__ == "__main__":
+    return config
 
-    # Configure training
-    args = parse_args()
+def init_sweep_config():
+    sweep_config = {
+        'method': 'random',
+        'metric': {
+            'name': 'bleu',
+            'goal': 'maximize'   
+        },
+        'parameters': {
+            'batch_size': {
+                'values': [4, 8, 16]
+            },
+            'embed_size': {
+                'values': [256]
+            },
+            'hidden_size': {
+                'values': [256]
+            },
+            'num_layers': {
+                'values': [2, 3, 6]
+            },
+            'num_warmups': {
+                'values': [200, 500, 1000, 2000]
+            },
+            'optim_params_separated': {
+                'values': [True, False]
+            },
+        }
+    }
+    return sweep_config
 
-    set_seed(args.seed)
-    device, use_cuda, use_mps = setup_gpu(args.cuda, args.mps)
 
-    vocab = load_vocab(args.vocab_file_path, args.data_path)
-
-    train_dataloader, valid_dataloader = create_data_loaders(args.data_path, vocab, configure_transform_imgs(
-        args.model_type, args.img_crop_size), args.batch_size, use_cuda or use_mps)
-
-    lr = args.lr
-
-    model = configure_model(args.model_type, vocab, device, lr)
-
-
-    # Initialize wandb run
-    config = model.config
-    config["epochs"] = args.epochs
-    config["batch"] = args.batch_size
-    run = wandb.init(project="Pix2Code_" + args.model_type, config=config)
+def train(args, device, vocab, model, train_dataloader, valid_dataloader):
 
     # Log start date and time
     start = datetime.datetime.now()
     print("Start Training date and time: {}".format(
         start.strftime("%Y-%m-%d %H:%M:%S")))
-
 
     # Initialize variables for early stopping
     epochs_without_improvement = 0
@@ -184,16 +208,16 @@ if __name__ == "__main__":
         avg_bleu_score = np.mean(bleu_scores)
 
         # Early stopping condition
-        #if avg_bleu_score > best_bleu_score:
-            #best_bleu_score = avg_bleu_score
-            #epochs_without_improvement = 0
-        #else:
-            #epochs_without_improvement += 1
+        if avg_bleu_score > best_bleu_score:
+            best_bleu_score = avg_bleu_score
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
 
-        #if epoch >= 15 and epochs_without_improvement >= args.early_stopping_patience:
-            #print(
-                #"Stopping training early due to lack of improvement in validation BLEU score.")
-            #break
+        is_warmup = model.num_warmups and len(train_dataloader) * epoch < model.num_warmups
+        if not is_warmup and epochs_without_improvement >= args.early_stopping_patience:
+            print("Stopping training early due to lack of improvement in validation BLEU score.")
+            break
 
         if epoch != 0 and epoch % args.save_after_epochs == 0:
             model.save(args.models_dir, epoch, loss, avg_bleu_score, args.batch_size)
@@ -212,3 +236,41 @@ if __name__ == "__main__":
 
     model.save(args.models_dir, epoch, loss, avg_bleu_score, args.batch_size)
     print("Saved final model")
+
+def train_with_sweep():
+    args = parse_args()
+
+    wandb.init(project="Pix2Code_" + args.model_type)
+    config = wandb.config
+    set_seed(args.seed)
+    device, use_cuda, use_mps = setup_gpu(args.cuda, args.mps)
+
+    vocab = load_vocab(args.vocab_file_path, args.data_path)
+
+    model = configure_model(args.model_type, vocab, device, config)
+    args.batch_size = config["batch_size"]
+    train_dataloader, valid_dataloader = create_data_loaders(args.data_path, vocab, configure_transform_imgs(args.model_type, args.img_crop_size), args.batch_size, use_cuda or use_mps)
+
+    train(args, device, vocab, model, train_dataloader, valid_dataloader)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    
+    set_seed(args.seed)
+    device, use_cuda, use_mps = setup_gpu(args.cuda, args.mps)
+
+    vocab = load_vocab(args.vocab_file_path, args.data_path)
+
+    if not args.sweep:
+        # Single run
+        config = init_model_config(args.model_type, args.lr, args.batch_size) 
+        model = configure_model(args.model_type, vocab, device, config)
+        run = wandb.init(project="Pix2Code_" + args.model_type, config=config)
+        train_dataloader, valid_dataloader = create_data_loaders(args.data_path, vocab, configure_transform_imgs(args.model_type, args.img_crop_size), args.batch_size, use_cuda or use_mps)
+        train(args, device, vocab, model, train_dataloader, valid_dataloader)
+    else:
+        # Sweep
+        sweep_id = wandb.sweep(init_sweep_config(), project="Pix2Code_" + args.model_type)
+        wandb.agent(sweep_id, function=train_with_sweep, count=10)
+
